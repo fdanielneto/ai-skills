@@ -39,52 +39,69 @@ nest inside their parent `<li>`. Storage format snippet:
 
 **Playwright MCP is the only supported method for this section.**
 
-#### Primary — Playwright MCP available
-
-> Do **not** resize the browser and do **not** normalize/zoom the layout. The
-> page is captured as-is. These steps were found to break the captured table —
-> keep the flow minimal.
-
-##### Step 1 — Navigate + auth guard
+#### Step 1 — Navigate + auth guard
 - `browser_navigate` to the URL below.
 - Poll until URL contains `jira/ops/alerts`; retry up to 30 s if redirected.
+- If auth does not complete within 30 s, emit the warning panel and abort.
 
-##### Step 2 — Filter by sprint dates
+#### Step 2 — Filter by sprint dates (resilient lazy-load filter)
 
-Run via `browser_evaluate`. The "Created" column is the **8th** column, so read
-it directly from `td:nth-child(8)` (do NOT search the header for the index):
+The alerts table lazy-loads rows in batches as the page renders. A one-shot
+filter misses rows that arrive after the first pass. Use `browser_evaluate`
+with the following logic: install a `MutationObserver` to re-apply the filter
+on every new batch, then wait until the row count is stable for 1.5 s (or 8 s
+total), then do a final pass.
+
+The "Created" column is the **8th** column — read it directly from
+`td:nth-child(8)` (do NOT search the header for the index):
 
 ```js
-const start = new Date('SPRINT_STARTT00:00:00');
-const end   = new Date('SPRINT_ENDT23:59:59');
+async () => {
+  const start = new Date('SPRINT_STARTT00:00:00');
+  const end   = new Date('SPRINT_ENDT23:59:59');
 
-const table = document.querySelector('table');
-const rows = [...table.querySelectorAll('tbody tr')];
+  function applyFilter() {
+    const rows = [...document.querySelectorAll('table tbody tr')];
+    let visible = 0, invalid = 0;
+    for (const r of rows) {
+      const raw = r.querySelector('td:nth-child(8)')?.textContent?.trim();
+      const d = new Date(raw);
+      if (isNaN(d))             { invalid++; r.style.display = 'none'; continue; }
+      if (d < start || d > end) {           r.style.display = 'none'; continue; }
+      r.style.display = '';
+      visible++;
+    }
+    return { total: rows.length, visible, invalid };
+  }
 
-let visible = 0, invalid = 0;
+  const tbody = document.querySelector('table tbody');
+  const obs = new MutationObserver(() => applyFilter());
+  obs.observe(tbody, { childList: true, subtree: true });
 
-for (const r of rows) {
-  const cell = r.querySelector('td:nth-child(8)');
-  const raw = cell?.textContent?.trim();
-  const d = new Date(raw);
-
-  if (isNaN(d)) { invalid++; r.style.display = "none"; continue; }
-  if (d < start || d > end) { r.style.display = "none"; continue; }
-  visible++;
+  let last = -1, stableMs = 0;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 8000) {
+    const n = document.querySelectorAll('table tbody tr').length;
+    applyFilter();
+    if (n === last) { stableMs += 250; if (stableMs >= 1500) break; }
+    else            { stableMs = 0; last = n; }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  obs.disconnect();
+  return { ...applyFilter(), settledRows: last };
 }
-
-return { total: rows.length, visible, invalid };
 ```
 
 If no rows fall in the sprint window, still proceed to capture the filtered
 (header-only) table as evidence — never fabricate rows.
 
-##### Step 3 — FINAL SCREENSHOT (ONLY ONE)
+#### Step 3 — Screenshot
 
 `browser_take_screenshot` with:
 - `filename`: `oncall-alerts-{sprint}.png`
 - do NOT use `target` (no element screenshots)
-- do NOT resize, zoom, or scroll beforehand
+
+#### Step 4 — Publish to Confluence
 
 Upload the PNG as a page attachment and embed it **directly under the plain
 link** — no caption, no label, no surrounding descriptive text:
@@ -116,17 +133,13 @@ Do **not** attempt to build any table or invent alert rows. Never emit `[TODO]`.
 
 ## Rules
 - Only one screenshot. No element screenshots (no `target`).
-- **Do NOT resize the browser.**
-- **Do NOT normalize/zoom the layout** — no `zoom`, no margin/padding/width
-  changes. The page is captured as-is (this is what produced the correct table).
 - **Authentication guard**: after `browser_navigate`, poll until URL contains
   `jira/ops/alerts`, retrying up to 30 s. If auth does not complete, emit the
   warning panel and abort.
-- **Filter by the "Created" column in the DOM** using `td:nth-child(8)` — hide
-  every row outside `[sprint_start 00:00:00 … sprint_end 23:59:59]` via
-  `display:none`. Do NOT use the page's "time" UI filter and do NOT append date
-  params to the URL.
-- No scroll manipulation.
+- **Filter by the "Created" column in the DOM** using `td:nth-child(8)` with a
+  `MutationObserver` that re-applies the filter on every lazy-load batch, waiting
+  until the row count is stable (max 8 s). Do NOT use the page's "time" UI
+  filter and do NOT append date params to the URL.
 - Embed the screenshot **directly under the plain link** — no caption, no label,
   no surrounding paragraph.
 - Responder ID `5b660e34-8c85-4c01-b3c5-c96d192300cf` = OnCall Interconnect.
