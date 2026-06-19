@@ -107,13 +107,14 @@ Upload the PNG as a page attachment and embed it **directly under the plain
 link** — no caption, no label, no surrounding descriptive text:
 
 ```xml
-<ac:image ac:align="center" ac:layout="center" ac:width="950">
+<ac:image ac:align="center" ac:width="760">
   <ri:attachment ri:filename="oncall-alerts-{sprint}.png"/>
 </ac:image>
 ```
 
-> Both `ac:align="center"` and `ac:layout="center"` are required for visual
-> centering in Confluence Cloud.
+> `ac:align="center"` centres the image. `ac:width="760"` matches the
+> Confluence Cloud content area width — prevents overflow and keeps the
+> image visually centred.
 
 #### URL
 
