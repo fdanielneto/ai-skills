@@ -50,7 +50,37 @@ nest inside their parent `<li>`. Storage format snippet:
 
 2. `browser_navigate` to the URL below.
 
-3. `browser_wait_for` any visible alert content to confirm the page loaded.
+3. **Authentication guard** — poll until the alerts page is fully loaded (handles
+   SSO redirects and session-expiry scenarios). The persistent Playwright profile
+   (`~/Library/Caches/ms-playwright/mcp-*/`) retains the session after the first
+   login, so this guard is a no-op on warm runs; it only activates when auth is
+   actually required.
+
+   Repeat up to **6 times** (= 30 s maximum), with a **5 s pause between checks**:
+
+   **a. Check current URL:**
+   ```js
+   // browser_evaluate
+   () => window.location.href
+   ```
+   - Result contains `"jira/ops/alerts"` → authenticated; exit loop, proceed to step 4.
+   - Result contains `"login"`, `"id.atlassian"`, or `"sso"` → still on auth page;
+     go to step b.
+   - Tool raises `"no page"` / `"context closed"` / `"Target page, context or browser
+     has been closed"` error → the browser window was closed during the auth flow;
+     call `browser_navigate` once with the alerts URL to reopen it, then restart
+     the loop from step a (reset the iteration counter).
+
+   **b. Wait 5 seconds:**
+   ```js
+   // browser_evaluate
+   () => new Promise(r => setTimeout(r, 5000))
+   ```
+   Then return to step a.
+
+   **If 6 iterations are exhausted without reaching the alerts page:** emit a
+   `warning` macro — *"Authentication did not complete within 30 s. See link
+   above."* — and abort this section. Do not proceed to the filter or screenshot.
 
 4. **Apply the time filter** to restrict the view to the sprint window:
    - Click the **"time"** filter field in the alerts UI.
@@ -110,6 +140,11 @@ Do **not** attempt to build any table or invent alert rows. Never emit `[TODO]`.
 ## Rules
 - Evidence is a Playwright **screenshot** only — no structured table.
 - **Viewport must be ≥ 1920×1080** before navigating to avoid column overflow.
+- **Authentication guard is mandatory**: after `browser_navigate`, poll
+  `window.location.href` every 5 s for up to 30 s before proceeding. If the
+  browser window closes during SSO, call `browser_navigate` again (once) to
+  reopen it. If auth does not complete within 30 s, emit the warning panel and
+  abort — never skip or shorten the guard.
 - The screenshot must show only alerts **created within the sprint window**:
   apply the **"time"** filter, select **"between"**, set start = `sprint_start`
   and end = `sprint_end` in the UI. Do not append date params to the URL.
