@@ -41,69 +41,50 @@ nest inside their parent `<li>`. Storage format snippet:
 
 #### Primary — Playwright MCP available
 
-##### Step 1 — Resize browser
-- width: 1920
-- height: 1080
+> Do **not** resize the browser and do **not** normalize/zoom the layout. The
+> page is captured as-is. These steps were found to break the captured table —
+> keep the flow minimal.
 
-##### Step 2 — Navigate + auth guard
+##### Step 1 — Navigate + auth guard
 - `browser_navigate` to the URL below.
 - Poll until URL contains `jira/ops/alerts`; retry up to 30 s if redirected.
 
-##### Step 3 — Normalize layout (critical)
+##### Step 2 — Filter by sprint dates
 
-Run via `browser_evaluate` before the filter:
-
-```js
-document.body.style.zoom = "50%";
-
-document.body.style.margin = "0";
-document.body.style.padding = "0";
-document.documentElement.style.margin = "0";
-document.documentElement.style.padding = "0";
-
-const root = document.querySelector('#jira, #root, main, body');
-if (root) {
-  root.style.width = "100vw";
-  root.style.maxWidth = "none";
-}
-```
-
-##### Step 4 — Filter by sprint dates
-
-Run via `browser_evaluate`:
+Run via `browser_evaluate`. The "Created" column is the **8th** column, so read
+it directly from `td:nth-child(8)` (do NOT search the header for the index):
 
 ```js
 const start = new Date('SPRINT_STARTT00:00:00');
 const end   = new Date('SPRINT_ENDT23:59:59');
 
 const table = document.querySelector('table');
-const headers = [...table.querySelectorAll('th')];
-const createdIdx = headers.findIndex(h => /created/i.test(h.textContent));
-
 const rows = [...table.querySelectorAll('tbody tr')];
 
+let visible = 0, invalid = 0;
+
 for (const r of rows) {
-  const cell = r.querySelectorAll('td')[createdIdx];
+  const cell = r.querySelector('td:nth-child(8)');
   const raw = cell?.textContent?.trim();
   const d = new Date(raw);
 
-  if (isNaN(d) || d < start || d > end) {
-    r.style.display = "none";
-  }
+  if (isNaN(d)) { invalid++; r.style.display = "none"; continue; }
+  if (d < start || d > end) { r.style.display = "none"; continue; }
+  visible++;
 }
 
-table.setAttribute("data-pm-shot", "1");
+return { total: rows.length, visible, invalid };
 ```
 
 If no rows fall in the sprint window, still proceed to capture the filtered
 (header-only) table as evidence — never fabricate rows.
 
-##### Step 5 — FINAL SCREENSHOT (ONLY ONE)
+##### Step 3 — FINAL SCREENSHOT (ONLY ONE)
 
 `browser_take_screenshot` with:
-- `fullPage`: `true`
 - `filename`: `oncall-alerts-{sprint}.png`
 - do NOT use `target` (no element screenshots)
+- do NOT resize, zoom, or scroll beforehand
 
 Upload the PNG as a page attachment and embed it **directly under the plain
 link** — no caption, no label, no surrounding descriptive text:
@@ -134,17 +115,17 @@ Do **not** attempt to build any table or invent alert rows. Never emit `[TODO]`.
 ---
 
 ## Rules
-- Only one screenshot — full page (`fullPage: true`). No element screenshots.
-- **Resize to 1920×1080 before navigating.**
-- **Normalize layout before filtering**: apply zoom 50%, zero margins/padding,
-  and `width: 100vw` on the root element (step 3) — this is required for the
-  full-page capture to render correctly.
+- Only one screenshot. No element screenshots (no `target`).
+- **Do NOT resize the browser.**
+- **Do NOT normalize/zoom the layout** — no `zoom`, no margin/padding/width
+  changes. The page is captured as-is (this is what produced the correct table).
 - **Authentication guard**: after `browser_navigate`, poll until URL contains
   `jira/ops/alerts`, retrying up to 30 s. If auth does not complete, emit the
   warning panel and abort.
-- **Filter by the "Created" column in the DOM** — hide every row outside
-  `[sprint_start 00:00:00 … sprint_end 23:59:59]` via `display:none`. Do NOT
-  use the page's "time" UI filter and do NOT append date params to the URL.
+- **Filter by the "Created" column in the DOM** using `td:nth-child(8)` — hide
+  every row outside `[sprint_start 00:00:00 … sprint_end 23:59:59]` via
+  `display:none`. Do NOT use the page's "time" UI filter and do NOT append date
+  params to the URL.
 - No scroll manipulation.
 - Embed the screenshot **directly under the plain link** — no caption, no label,
   no surrounding paragraph.
