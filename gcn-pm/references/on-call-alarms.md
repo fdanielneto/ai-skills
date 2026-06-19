@@ -41,12 +41,12 @@ nest inside their parent `<li>`. Storage format snippet:
 
 #### Primary — Playwright MCP available
 
-1. **Resize the browser viewport** to at least **1920×1080** before navigating:
-   ```js
-   // browser_resize or equivalent
-   width: 1920, height: 1080
-   ```
-   This ensures all table columns fit in the viewport without horizontal overflow.
+1. **Resize the browser to a wide desktop viewport** (`browser_resize`,
+   width=1920, height=1080) before navigating. This is **only** to force the
+   desktop multi-column table layout (so columns render side by side, not a
+   responsive stacked layout) — it is **not** the screenshot/cropping mechanism.
+   The full-width capture is guaranteed later by the **element screenshot**
+   (step 5), not by the viewport size.
 
 2. `browser_navigate` to the URL below.
 
@@ -82,31 +82,59 @@ nest inside their parent `<li>`. Storage format snippet:
    `warning` macro — *"Authentication did not complete within 30 s. See link
    above."* — and abort this section. Do not proceed to the filter or screenshot.
 
-4. **Apply the time filter** to restrict the view to the sprint window:
-   - Click the **"time"** filter field in the alerts UI.
-   - Select the **"between"** option.
-   - Set **start time** = `sprint_start` (sprint start date).
-   - Set **end time** = `sprint_end` (sprint end date).
-   - Wait for the table to reload — only alerts created within the sprint window
-     should remain visible.
-   - Do NOT add date parameters to the URL query string — it causes a
-     "We couldn't load the alerts" server error; filter in-UI after load.
+4. **Filter rows by the "Created" column, in the DOM** (authoritative — do NOT
+   use the page's "time" UI filter; it does not restrict reliably). Hide every
+   row whose Created date falls **outside** the sprint window
+   `[sprint_start 00:00:00 … sprint_end 23:59:59]`, leaving only in-sprint rows
+   visible, then tag the table so the next step can target it.
 
-5. **Verify all required columns are visible** in the viewport before taking the
-   screenshot. The following 9 columns must all be fully visible:
-   **ID, Priority, Summary, Status, Tags, Created, Responders, Assignee, Actions**.
-   If any column is hidden or clipped by horizontal overflow, reduce the browser
-   zoom level via:
+   The "Created" cell shows an absolute date like `Jun 17, 2026 10:55 AM`, which
+   `new Date(...)` parses directly. Prefer a `<time datetime>` or `title`
+   attribute if present; fall back to the cell text.
+
+   Run via `browser_evaluate` (inspect the table first with `browser_snapshot`
+   to confirm the row/column selectors, then adapt this template):
    ```js
-   // browser_evaluate
-   document.body.style.zoom = '80%'
+   () => {
+     const start = new Date('SPRINT_START' + 'T00:00:00');
+     const end   = new Date('SPRINT_END'   + 'T23:59:59');
+     const table = document.querySelector('table, [role="grid"]');        // adapt
+     const headers = [...table.querySelectorAll('th,[role="columnheader"]')];
+     const createdIdx = headers.findIndex(h => /created/i.test(h.textContent));
+     const rows = [...table.querySelectorAll('tbody tr, [role="row"]')]
+       .filter(r => r.querySelector('td,[role="gridcell"]'));            // skip header row
+     let visible = 0;
+     for (const r of rows) {
+       const cell = r.querySelectorAll('td,[role="gridcell"]')[createdIdx];
+       const raw = cell?.querySelector('time')?.getAttribute('datetime')
+                || cell?.getAttribute('title')
+                || cell?.textContent?.trim();
+       const d = new Date(raw);
+       if (isNaN(d) || d < start || d > end) r.style.display = 'none';
+       else visible++;
+     }
+     table.setAttribute('data-pm-shot', '1');
+     return { visible, total: rows.length, createdIdx };
+   }
    ```
-   Then wait for the re-render and confirm all columns are visible before
-   proceeding.
+   Confirm `createdIdx` is not `-1` (header matched) and that `visible` is the
+   expected in-sprint count before continuing. If `visible === 0`, still proceed
+   to capture the filtered (header-only) table as evidence that no alerts were
+   created in the window — never fabricate rows.
 
-6. `browser_take_screenshot` — save to `/tmp/oncall-alerts-{sprint}.png`, upload
-   as a page attachment and embed via the storage snippet below,
-   **directly under the plain link with no caption, no label, and no
+5. **Element screenshot of the filtered table** — capture the tagged table
+   element directly. An element screenshot grabs the element's **full bounding
+   box**, including columns that overflow the viewport horizontally, so **all 9
+   columns (including Assignee) are captured** and only the in-sprint rows
+   (the rest are `display:none`).
+
+   `browser_take_screenshot` with:
+   - `target`: `[data-pm-shot="1"]` (the table element — element screenshot)
+   - `filename`: `oncall-alerts-{sprint}.png`
+   - do NOT set `fullPage` (it is incompatible with element screenshots)
+
+   Upload the PNG as a page attachment and embed it via the storage snippet
+   below, **directly under the plain link with no caption, no label, and no
    surrounding descriptive text**. Do NOT emit any text such as
    "OnCall Interconnect alerts — sprint … (screenshot from Atlassian Ops)" or
    similar before or after the image.
@@ -138,25 +166,30 @@ Do **not** attempt to build any table or invent alert rows. Never emit `[TODO]`.
 ---
 
 ## Rules
-- Evidence is a Playwright **screenshot** only — no structured table.
-- **Viewport must be ≥ 1920×1080** before navigating to avoid column overflow.
+- Evidence is a Playwright **element screenshot of the alerts table** — no
+  structured table authored by hand.
+- **Resize to 1920×1080 before navigating** — only to force the desktop
+  multi-column layout, NOT as the capture mechanism.
 - **Authentication guard is mandatory**: after `browser_navigate`, poll
   `window.location.href` every 5 s for up to 30 s before proceeding. If the
   browser window closes during SSO, call `browser_navigate` again (once) to
   reopen it. If auth does not complete within 30 s, emit the warning panel and
   abort — never skip or shorten the guard.
-- The screenshot must show only alerts **created within the sprint window**:
-  apply the **"time"** filter, select **"between"**, set start = `sprint_start`
-  and end = `sprint_end` in the UI. Do not append date params to the URL.
-- All **9 columns** (ID, Priority, Summary, Status, Tags, Created, Responders,
-  Assignee, Actions) must be fully visible before taking the screenshot. Reduce
-  browser zoom if needed to fit all columns in the viewport.
+- **Filter by the "Created" column in the DOM** — hide every row outside
+  `[sprint_start 00:00:00 … sprint_end 23:59:59]` via `display:none` before the
+  screenshot. Do NOT use the page's "time" UI filter (it does not restrict
+  reliably) and do NOT append date params to the URL.
+- **Capture with an element screenshot** (`target="[data-pm-shot='1']"`), never a
+  viewport/`fullPage` screenshot. The element screenshot captures the table's
+  full width, guaranteeing all 9 columns (ID, Priority, Summary, Status, Tags,
+  Created, Responders, Assignee, Actions) — including **Assignee** — and only the
+  in-sprint rows.
 - Embed the screenshot **directly under the plain link** — no caption, no label,
   no surrounding paragraph.
 - The `<ac:image>` embed **must carry both `ac:align="center"` and
   `ac:layout="center"`**. Using only `ac:align` leaves the image left-aligned
   in the rendered Confluence Cloud page.
-- Do NOT add `createdAt` to the URL query string — it causes a server error.
 - Responder ID `5b660e34-8c85-4c01-b3c5-c96d192300cf` = OnCall Interconnect.
-- Never invent or fabricate alert data.
+- Never invent or fabricate alert data. If no alerts fall in the sprint window,
+  capture the filtered (empty) table as evidence — never `[TODO]`.
 - If Playwright is unavailable, emit the warning panel and the plain link only — never `[TODO]`.
