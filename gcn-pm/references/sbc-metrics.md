@@ -19,19 +19,21 @@ to navigate the dashboards.
 
 ### Region → SBC → Kibana filter map
 
-Each sub-region corresponds to exactly **one SBC**. Use the Kibana filter value
-from the table below when capturing per-SBC screenshots in §B.
+Each sub-region corresponds to exactly **one SBC** and one `region.keyword`
+value. Use the `region.keyword` value from the table below when applying the
+DSL filter for that sub-region in §B (the SBC name is kept only for the dropdown
+caption).
 
-| Region             | Ribbon  | Kibana filter value |
-|--------------------|---------|---------------------|
-| EU-South-1         | EU      | `PRDEUS1RSBC`       |
-| EU-West-3          | EU      | `PRDEUW3RSBC`       |
-| US-East-1          | US      | `prduse1rsbc`       |
-| US-West-2          | US      | `prdusw2rsbc`       |
-| AP1 - Singapore    | APAC    | `PRDAPS1RSBC`       |
-| AP2 - Sydney       | APAC    | `PRDAPS2RSBC`       |
-| LATAM-AZ1 (São Paulo) | LATAM | `PRDSAE1RSBC1`    |
-| LATAM-AZ2 (São Paulo) | LATAM | `PRDSAE1RSBC2`    |
+| Region             | Ribbon  | SBC name (caption) | `region.keyword` filter |
+|--------------------|---------|--------------------|-------------------------|
+| EU-South-1         | EU      | `PRDEUS1RSBC`      | `eu-south-1`            |
+| EU-West-3          | EU      | `PRDEUW3RSBC`      | `eu-west-3`             |
+| US-East-1          | US      | `prduse1rsbc`      | `us-east-1`             |
+| US-West-2          | US      | `prdusw2rsbc`      | `us-west-2`             |
+| AP1 - Singapore    | APAC    | `PRDAPS1RSBC`      | `ap-southeast-1`        |
+| AP2 - Sydney       | APAC    | `PRDAPS2RSBC`      | `ap-southeast-2`        |
+| LATAM-AZ1 (São Paulo) | LATAM | `PRDSAE1RSBC1`   | `sa-east-1`             |
+| LATAM-AZ2 (São Paulo) | LATAM | `PRDSAE1RSBC2`   | `sa-east-2`             |
 
 ### Collection rules
 
@@ -42,15 +44,17 @@ from the table below when capturing per-SBC screenshots in §B.
      Reason chart/screenshot, Disconnect Reason top-10 table) against the
      global dashboards (all regions combined).
    - Run the per-Ribbon disconnect-code prompt (defined in §A-4) four times
-     (EU, US, APAC, LATAM), each time applying the two SBC filters for that
-     Ribbon. Build one mini-table per Ribbon from the results.
+     (EU, US, APAC, LATAM), each time applying the two `region.keyword` filters
+     for that Ribbon via the DSL `should` filter. Build one mini-table per Ribbon
+     from the results.
 
    **Detailed data by Region data (§B):**
-   - For each sub-region, navigate to the CDR dashboard, apply the SBC-specific
-     Kibana filter from the map above (showing only that SBC), capture a focused
+   - For each sub-region, navigate to the CDR dashboard, apply the sub-region's
+     `region.keyword` DSL filter from the map above (showing only that region),
+     wait for the page to load, maximize the panel, and capture a focused
      screenshot with `browser_take_screenshot`.
    - Save to `/tmp/sbc-<FILTER>-<TIMESTAMP>.png`
-     where `<FILTER>` is the exact Kibana filter value (e.g. `PRDEUS1RSBC`) and
+     where `<FILTER>` is the exact `region.keyword` value (e.g. `eu-south-1`) and
      `<TIMESTAMP>` is a compact UTC ISO-8601 string (e.g. `20260620T101500Z`).
    - Upload each PNG as a page attachment and embed via:
      `<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="..."/></ac:image>`
@@ -77,11 +81,12 @@ A single heading (H1) that is itself a link to the Kibana overview dashboard:
 Immediately after the heading-link, emit **exactly one** plain sentence:
 
 ```
-Sprint <YYYY-MM-DD> to <YYYY-MM-DD>. Total: <N> completed calls.
+Total: <N> completed calls.
 ```
 
 - `<N>` = total STOP-record call count for the sprint (collected from Kibana).
 - Use comma-separated thousands (e.g. `2,365,167`).
+- Do NOT include the sprint date in this sentence.
 
 Then, in sequence, emit the following four content blocks:
 
@@ -131,17 +136,28 @@ Use Playwright MCP only.
 1) Open https://kibana-logging.svc.talkdeskapp.com/goto/d6c9c100-aa74-11f0-bf0b-535e63bd4e70
    and wait for the dashboard to fully load (all panels rendered, legends visible).
 
-2) Find the dashboard panel element with data-test-subj="dashboardPanel" whose
+2) BEFORE maximizing any panel, add a filter via the Kibana filter bar:
+   "Add filter" → "Edit as Query DSL" → paste EXACTLY the following DSL, then
+   toggle "Negate" ON (so disconnect code 16 / Normal Clearing is EXCLUDED), and
+   Save. Wait for all panels to re-render with code 16 removed.
+
+   {
+     "query": {
+       "match_phrase": {
+         "Call Disconnect Reason.keyword": "16"
+       }
+     }
+   }
+
+   (The filter must be NEGATED — the goal of this chart is the distribution
+   WITHOUT code 16. A non-negated filter would show only code 16, which is wrong.)
+
+3) Find the dashboard panel element with data-test-subj="dashboardPanel" whose
    heading text contains "Call Disconnect Reason (all)".
 
-3) Click the button with data-test-subj="embeddablePanelToggleMenuIcon" and then
+4) Click the button with data-test-subj="embeddablePanelToggleMenuIcon" and then
    click "Maximize panel" so that the "Call Disconnect Reason (all)" chart is
-   shown in full-screen.
-
-4) In the maximized chart, locate the legend or value selector corresponding to
-   disconnect code "16" (Normal Clearing). Click on the legend item or value "16"
-   so that code 16 is removed/filtered out from the visualization. Wait for the
-   chart to re-render with code 16 excluded.
+   shown in full-screen (now already excluding code 16 from step 2).
 
 5) Take a PNG screenshot of the entire maximized dashboard panel using
    browser_take_screenshot and save it to:
@@ -230,7 +246,7 @@ Each mini-table structure:
 - Remaining rows: one per disconnect code, ordered by count descending,
   `<Reason Name> (<code>)` → `<count> (<pct>%)`, pct = one decimal place.
 
-**Collection prompt (run once per Ribbon, substituting `<SBC_A>`, `<SBC_B>`,
+**Collection prompt (run once per Ribbon, substituting `<REGION_A>`, `<REGION_B>`,
 `<RIBBON_NAME>`):**
 
 ```
@@ -239,11 +255,21 @@ Use Playwright MCP only.
 1) Open https://kibana-logging.svc.talkdeskapp.com/goto/b1236460-5e74-11f1-bcc7-e33c7b83c1f3
    and wait for the dashboard to fully load.
 
-2) Apply a KQL or filter-bar filter so ONLY the two SBCs of this Ribbon group
-   are included:
-     SBC_A: <SBC_A>
-     SBC_B: <SBC_B>
-   Wait for all panels to re-render with the filter applied.
+2) Add a filter via the Kibana filter bar: "Add filter" → "Edit as Query DSL" →
+   paste EXACTLY the following DSL (substituting this Ribbon's two regions), then
+   Save. Wait for all panels to re-render with the filter applied.
+
+   {
+     "query": {
+       "bool": {
+         "should": [
+           { "match_phrase": { "region.keyword": "<REGION_A>" } },
+           { "match_phrase": { "region.keyword": "<REGION_B>" } }
+         ],
+         "minimum_should_match": 1
+       }
+     }
+   }
 
 3) Find the dashboard panel with data-test-subj="dashboardPanel" whose heading
    contains "Call Disconnect Reason - Table (all)". Maximize it.
@@ -259,14 +285,14 @@ Use Playwright MCP only.
      pct = code_count / total_STOP, one decimal place.
 ```
 
-Ribbon → SBC pair mapping:
+Ribbon → region.keyword pair mapping (used for the DSL `should` filter above):
 
-| Ribbon       | SBC_A          | SBC_B          |
-|--------------|----------------|----------------|
-| Ribbon EU    | `PRDEUS1RSBC`  | `PRDEUW3RSBC`  |
-| Ribbon US    | `prduse1rsbc`  | `prdusw2rsbc`  |
-| Ribbon APAC  | `PRDAPS1RSBC`  | `PRDAPS2RSBC`  |
-| Ribbon LATAM | `PRDSAE1RSBC1` | `PRDSAE1RSBC2` |
+| Ribbon       | REGION_A         | REGION_B         |
+|--------------|------------------|------------------|
+| Ribbon EU    | `eu-south-1`     | `eu-west-3`      |
+| Ribbon US    | `us-east-1`      | `us-west-2`      |
+| Ribbon APAC  | `ap-southeast-1` | `ap-southeast-2` |
+| Ribbon LATAM | `sa-east-1`      | `sa-east-2`      |
 
 Run the prompt **4 times** (once per Ribbon), collect the 4 resulting tables,
 and render them inside the four `<ac:layout-cell>` blocks defined above.
@@ -289,11 +315,12 @@ and render them inside the four `<ac:layout-cell>` blocks defined above.
 
    **With Playwright:**
 
-   One screenshot of the CDR dashboard for that sub-region's SBC, captured
-   using the Kibana filter value from the DATA COLLECTION map above.
+   One screenshot of the CDR dashboard for that sub-region, captured using the
+   `region.keyword` DSL filter value from the DATA COLLECTION map above.
 
-   **Per-SBC collection prompt template** (substitute `<FILTER>` and
-   `<REGION_NAME>`):
+   **Per-SBC collection prompt template** (substitute `<REGION_KEYWORD>`,
+   `<FILTER>` and `<REGION_NAME>`, where `<REGION_KEYWORD>` is the sub-region's
+   `region.keyword` value and `<FILTER>` is that same value used in the filename):
 
    ```
    Use Playwright MCP only.
@@ -302,17 +329,29 @@ and render them inside the four `<ac:layout-cell>` blocks defined above.
       https://kibana-logging.svc.talkdeskapp.com/app/dashboards#/view/97c532ef-3354-4392-a153-141a02816e90
       Wait for the dashboard to fully load (all visualizations rendered).
 
-   2) Apply a KQL or filter-bar filter to restrict data to SBC "<FILTER>" only
-      (e.g. sbc_host: "<FILTER>"). Wait for all panels to re-render.
+   2) Add a filter via the Kibana filter bar: "Add filter" → "Edit as Query DSL"
+      → paste EXACTLY the following DSL, then Save. Wait for the page to load and
+      all panels to re-render with the filter applied.
 
-   3) Take a PNG screenshot of the full dashboard using browser_take_screenshot
-      and save it to:
+      {
+        "query": {
+          "bool": {
+            "should": [
+              { "match_phrase": { "region.keyword": "<REGION_KEYWORD>" } }
+            ],
+            "minimum_should_match": 1
+          }
+        }
+      }
+
+   3) After the page has reloaded with the filter applied, maximize the panel and
+      take a PNG screenshot using browser_take_screenshot, saving it to:
       /tmp/sbc-<FILTER>-<TIMESTAMP>.png
       where <TIMESTAMP> is the current UTC time formatted as YYYYMMDDTHHmmssZ
       (e.g. 20260620T101500Z).
 
    Return ONLY:
-   - the Kibana filter applied
+   - the region.keyword filter applied
    - absolute file path of the screenshot
    ```
 
