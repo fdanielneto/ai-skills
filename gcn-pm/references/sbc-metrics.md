@@ -335,11 +335,8 @@ and render them inside the four `<ac:layout-cell>` blocks defined above.
 
       {
         "query": {
-          "bool": {
-            "should": [
-              { "match_phrase": { "region.keyword": "<REGION_KEYWORD>" } }
-            ],
-            "minimum_should_match": 1
+          "match_phrase": {
+            "region.keyword": "<REGION_KEYWORD>"
           }
         }
       }
