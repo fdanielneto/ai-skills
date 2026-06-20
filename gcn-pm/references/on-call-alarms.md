@@ -39,20 +39,82 @@ nest inside their parent `<li>`. Storage format snippet:
 
 **Playwright MCP is the only supported method for this section.**
 
-#### Primary — Playwright MCP available
+#### Step 1 — Navigate + auth guard
+- `browser_navigate` to the URL below.
+- Poll until URL contains `jira/ops/alerts`; retry up to 30 s if redirected.
+- If auth does not complete within 30 s, emit the warning panel and abort.
 
-1. `browser_navigate` to the URL below.
-2. `browser_wait_for` any visible alert content to confirm the page loaded.
-3. Apply the **created-date filter** to the sprint window in the UI (set the date
-   range picker to `sprint_start`–`sprint_end`) so only alerts **created during
-   the sprint** are visible. Do NOT add `createdAt` to the URL query string — it
-   causes a "We couldn't load the alerts" server error; filter in-UI after load.
-4. `browser_take_screenshot` — save to `/tmp/oncall-alerts-{sprint}.png`, upload
-   as a page attachment and embed via `<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="..."/></ac:image>`
-   (storage format), **directly under the plain link with no caption, no label, and no
-   surrounding descriptive text**. Do NOT emit any text such as
-   "OnCall Interconnect alerts — sprint … (screenshot from Atlassian Ops)" or
-   similar before or after the image.
+#### Step 2 — Filter by sprint dates (resilient lazy-load filter)
+
+The alerts table lazy-loads rows in batches as the page renders. A one-shot
+filter misses rows that arrive after the first pass. Use `browser_evaluate`
+with the following logic: install a `MutationObserver` to re-apply the filter
+on every new batch, then wait until the row count is stable for 1.5 s (or 8 s
+total), then do a final pass.
+
+The "Created" column is the **8th** column — read it directly from
+`td:nth-child(8)` (do NOT search the header for the index):
+
+```js
+async () => {
+  const start = new Date('SPRINT_STARTT00:00:00');
+  const end   = new Date('SPRINT_ENDT23:59:59');
+
+  function applyFilter() {
+    const rows = [...document.querySelectorAll('table tbody tr')];
+    let visible = 0, invalid = 0;
+    for (const r of rows) {
+      const raw = r.querySelector('td:nth-child(8)')?.textContent?.trim();
+      const d = new Date(raw);
+      if (isNaN(d))             { invalid++; r.style.display = 'none'; continue; }
+      if (d < start || d > end) {           r.style.display = 'none'; continue; }
+      r.style.display = '';
+      visible++;
+    }
+    return { total: rows.length, visible, invalid };
+  }
+
+  const tbody = document.querySelector('table tbody');
+  const obs = new MutationObserver(() => applyFilter());
+  obs.observe(tbody, { childList: true, subtree: true });
+
+  let last = -1, stableMs = 0;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 8000) {
+    const n = document.querySelectorAll('table tbody tr').length;
+    applyFilter();
+    if (n === last) { stableMs += 250; if (stableMs >= 1500) break; }
+    else            { stableMs = 0; last = n; }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  obs.disconnect();
+  return { ...applyFilter(), settledRows: last };
+}
+```
+
+If no rows fall in the sprint window, still proceed to capture the filtered
+(header-only) table as evidence — never fabricate rows.
+
+#### Step 3 — Screenshot
+
+`browser_take_screenshot` with:
+- `filename`: `oncall-alerts-{sprint}.png`
+- do NOT use `target` (no element screenshots)
+
+#### Step 4 — Publish to Confluence
+
+Upload the PNG as a page attachment and embed it **directly under the plain
+link** — no caption, no label, no surrounding descriptive text:
+
+```xml
+<ac:image ac:align="center" ac:width="760">
+  <ri:attachment ri:filename="oncall-alerts-{sprint}.png"/>
+</ac:image>
+```
+
+> `ac:align="center"` centres the image. `ac:width="760"` matches the
+> Confluence Cloud content area width — prevents overflow and keeps the
+> image visually centred.
 
 #### URL
 
@@ -71,13 +133,16 @@ Do **not** attempt to build any table or invent alert rows. Never emit `[TODO]`.
 ---
 
 ## Rules
-- Evidence is a Playwright **screenshot** only — no structured table.
-- The screenshot must show only alerts **created within the sprint window**
-  (apply the date-range filter in the UI after navigation; do not append date
-  params to the URL).
+- Only one screenshot. No element screenshots (no `target`).
+- **Authentication guard**: after `browser_navigate`, poll until URL contains
+  `jira/ops/alerts`, retrying up to 30 s. If auth does not complete, emit the
+  warning panel and abort.
+- **Filter by the "Created" column in the DOM** using `td:nth-child(8)` with a
+  `MutationObserver` that re-applies the filter on every lazy-load batch, waiting
+  until the row count is stable (max 8 s). Do NOT use the page's "time" UI
+  filter and do NOT append date params to the URL.
 - Embed the screenshot **directly under the plain link** — no caption, no label,
   no surrounding paragraph.
-- Do NOT add `createdAt` to the URL query string — it causes a server error.
 - Responder ID `5b660e34-8c85-4c01-b3c5-c96d192300cf` = OnCall Interconnect.
 - Never invent or fabricate alert data.
 - If Playwright is unavailable, emit the warning panel and the plain link only — never `[TODO]`.
