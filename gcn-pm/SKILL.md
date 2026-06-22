@@ -10,10 +10,12 @@ description: >
   general questions about Confluence, Grafana, Kibana, SIP, call metrics, or
   production meetings — only on the explicit invocation above.
   Usage: /gcn-pm SPRINT-START SPRINT-END [section...] [region...] (dates as YYYY-MM-DD).
-  Omit section/region for the full page.
+  Omit section/region for the full page. Run /gcn-pm help to list all available
+  section tokens, region tokens, and examples without building any page.
   Examples:
     /gcn-pm 2026-06-01 2026-06-02 xcc-metrics              (XCC, all regions)
     /gcn-pm 2026-06-01 2026-06-02 xcc-metrics eu-south-1   (XCC, one region only)
+    /gcn-pm help                                            (show reference card)
 ---
 
 # GCN Production Meeting — Page Builder (Orchestrator)
@@ -59,6 +61,49 @@ reference owns exactly one section of the final page.
 This skill is manual. Only proceed when the user explicitly invokes it
 (`/gcn-pm ...`) or explicitly asks to build the GCN production meeting page.
 
+## HELP MODE
+
+If the user runs `/gcn-pm help` (the single token `help` with no dates), do NOT
+build or publish a page. Instead, reply **inline** (plain text, no Confluence
+call) with the following reference card and then stop:
+
+```
+GCN Production Meeting builder — available runs
+
+Usage:
+  /gcn-pm <sprint-start YYYY-MM-DD> <sprint-end YYYY-MM-DD> [section ...] [region ...]
+  /gcn-pm help
+
+Section tokens (partial / block runs):
+  status-review      → Status Review
+  on-call-alarms     → On-Call Alarms
+  post-mortem        → Post-Mortem (last 90 days)
+  xcc-metrics        → XCC Metrics (Kamailio)
+  rtpengine-metrics  → RTP Engine Metrics
+  sbc-metrics        → Executive Summary + Detailed data by Region (SBC/calls)
+  events-tracking    → Events Tracking
+  all                → Full page (all sections — same as omitting section tokens)
+
+Region tokens (filter for xcc-metrics / rtpengine-metrics):
+  eu-south-1        ap-southeast-1
+  eu-west-3         ap-southeast-2
+  us-east-1         sa-east-1
+  us-west-2         ca-central-1
+
+  Omit region tokens to analyse all regions.
+  Tokens are case-insensitive; - and _ are interchangeable.
+
+Examples:
+  /gcn-pm 2026-06-01 2026-06-14                           full page, all regions
+  /gcn-pm 2026-06-01 2026-06-14 xcc-metrics               XCC only, all regions
+  /gcn-pm 2026-06-01 2026-06-14 xcc-metrics eu-south-1    XCC, EU-South-1 only
+  /gcn-pm 2026-06-01 2026-06-14 status-review post-mortem  two sections only
+  /gcn-pm help                                             show this message
+```
+
+Return this card verbatim (code block). Do not add commentary. Do not proceed
+to any data collection or publishing step.
+
 ## ARGUMENTS
 
 ```
@@ -80,7 +125,7 @@ Parsing rule: after the two dates, classify each remaining token in order:
 2. Matches a known **region token** (table below) → add to region filter.
 3. Matches neither → stop and ask the user to clarify rather than guessing.
 
-If invoked without dates, ask once:
+If invoked without dates (and not `help`), ask once:
 
 ```
 Please provide the sprint window:
