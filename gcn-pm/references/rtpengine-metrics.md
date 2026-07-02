@@ -99,32 +99,11 @@ For each region R:
 4. If ALL metrics for a region are within normal range: emit only the Grafana
    dashboard link. **Do not add any text.**
 
-### GENERIC DEVIATION → REFERENCE SCALAR + CHART rule (applies to EVERY metric)
+### GENERIC DEVIATION → REFERENCE SCALAR + CHART rule
 
-Every metric in `rtpengine-datasources.md` is processed exactly like the worked
-"Error Rates (Spikes)" example in `xcc-metrics.md` — fetch the data, run the
-metric's deviation rule, and when it deviates present a **reference scalar +
-a CHART**:
-
-- **Fetch**: run the metric's PromQL over the sprint (range query, 3600s step;
-  finer step only for zoom). Save the raw Prometheus JSON to `/tmp/*.json` and
-  `json.load` it — never retype numbers.
-- **Detect**: apply the metric's `deviation:` rule from the datasources file
-  (rate/count → mean±3σ; resource → median+2×IQR; alive → gap >5min; session
-  counts → median+2×IQR or stepwise change). Only deviating series proceed.
-- **Reference scalar** (emit before the chart, as plain text — NO table):
-  `Reference = N.NN {unit}`
-  (rate/count metrics → sprint mean; resource/session metrics → sprint median).
-- **Chart**: plot the metric over the sprint with one **solid** line per
-  instance/series, plus one **dotted** reference line = the metric's sprint
-  baseline (rate → mean; resource/session → median). Embed via `ac:image ac:align="center"` +
-  `ri:attachment`. Name files `rtpengine-{region}-{metric-slug}-overview.png`
-  and `rtpengine-{region}-{metric-slug}-zoom-{event}.png`. Generate PNGs with
-  matplotlib via bash_tool; verify each PNG before upload.
-  - All data lines: **solid** (`linestyle="-"`).
-  - Reference line: **dotted** (`linestyle=":", color="red"`,
-    `label=f"Reference = {REF:.3f} {unit}"`).
-- **Silence**: non-deviating metrics produce no reference scalar, no chart, no text.
+> Identical to the rule defined in `references/xcc-metrics.md`. Follow that
+> file's algorithm verbatim, substituting `rtpengine-{region}-{metric-slug}`
+> file name slugs and `rtpengine-datasources.md` metric entries.
 
 ## Issue-group headings (bold) — RTP-Engine-driven shapes
 (Emit ONLY when the deviation exists; never invent or pre-fill these.)
@@ -152,29 +131,15 @@ a CHART**:
 - This section is RTP Engine ONLY; Kamailio/XCC content stays in the XCC section.
 - Analyse ALL metrics in `references/rtpengine-datasources.md` (active +
   reference). EVERY metric is processed with the GENERIC DEVIATION → REFERENCE
-  SCALAR + CHART rule (fetch → detect → reference scalar + chart for deviating
-  series), exactly like the Error Rates worked example in `xcc-metrics.md`.
-- **SILENCE RULE**: publish ONLY deviating metrics AND deviating instances.
-  Metrics within normal range are completely omitted — no bullet, no comment,
-  no mention. Instances within normal range are completely omitted — no bullet,
-  not even a "no issue" note.
-- **FINDING FORMAT**: follow the FINDING FORMAT rule above for every bullet.
+  SCALAR + CHART rule (see `references/xcc-metrics.md`).
+- **SILENCE RULE**: see `references/common-patterns.md`.
+- **FINDING FORMAT**: see `references/common-patterns.md`.
   Each bullet = `<instance>: <metric> peak <value> <unit> at <timestamp>`.
-  No AZ/type tags. No threshold values. No editorial commentary.
-- **GRAFANA LINKS**: use the GRAFANA LINK FORMAT rule for every per-region
-  Grafana link — append `&var-region=<region>&from=<ms>&to=<ms>`.
+- **GRAFANA LINKS**: see `references/common-patterns.md`.
 - Do not invent values, goto URLs, instance names, or session counts.
-- For each deviating metric, emit `Reference = N.NN {unit}` (as plain text,
-  NO table) AND a chart that shows the deviation (overview + zoom per event).
-  - All data lines: **solid** (`linestyle="-"`).
-  - Reference line: **dotted** (`linestyle=":", color="red"`), labelled
-    `Reference = N.NN {unit}`.
-  Generate charts via matplotlib (bash_tool), save raw JSON to /tmp and
-  json.load it, and embed via `ac:image ac:align="center"`+`ri:attachment` (storage format) —
-  **with no caption** (no surrounding `<p><em>…</em></p>` label).
-  **Always set `ac:align="center" ac:width="950"` on every `<ac:image>` tag — omitting
-  `ac:align="center"` causes left-alignment in Confluence.**
-  Upload attachments via the Atlassian MCP upload tool or REST
-  `.../child/attachment` with `$ATLASSIAN_API_TOKEN`.
-- If the Grafana MCP is unavailable, emit a warning panel for the section rather
-  than `[TODO]` placeholders.
+- For each deviating metric: emit `Reference = N.NN {unit}` (plain text, NO table)
+  AND a chart that shows the deviation (overview + zoom per event). See
+  `xcc-metrics.md` CHART GENERATION section for the full algorithm.
+- Image alignment: see `references/common-patterns.md` — Image Alignment Rule.
+- No-TODO / fallback: see `references/common-patterns.md` — No-TODO Rule.
+- Publish: see `references/common-patterns.md` — Storage-Only Publish Rule.

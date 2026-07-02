@@ -227,13 +227,10 @@ to all other metrics:
   Label it `Reference = N.NN {unit}`.
 - **Silence**: non-deviating metrics produce no reference scalar, no chart, no text.
 
-### CHART GENERATION algorithm — worked example: Error Rates (inline, no external scripts)
+### CHART GENERATION algorithm — worked example: Error Rates
 
-> This is the canonical worked example of the GENERIC rule above, kept verbatim
-> because Error Rates is the most complex case (per error-code breakdown). Reuse
-> its structure (fetch → detect → reference scalar → overview + zoom bar chart)
-> for every other metric, adapting the breakdown dimension (instance, xheader,
-> code, method, mount, process, …) to the metric.
+See `references/xcc-error-rates-worked-example.md` for the full step-by-step
+algorithm. When implementing Error Rates charting, follow that file verbatim.
 
 > BREAK DOWN BY ERROR CODE — do NOT chart the accumulated total.
 > The charts must show one line per (instance, error code). Use the per-code
@@ -441,44 +438,17 @@ Embed charts **with no caption** (omit the surrounding `<p><em>…</em></p>` lab
 - Section scope is `role="edgerouter"` ONLY — never include other kamailio roles.
 - Analyse ALL metrics in `references/xcc-datasources.md` (active + reference),
   in section order. Do not add metrics from other sources. EVERY metric is
-  processed with the GENERIC DEVIATION → REFERENCE SCALAR + CHART rule (fetch →
-  detect → reference scalar + chart for deviating series) — not only the Error
-  Rates metric.
-- **SILENCE RULE**: publish ONLY deviating metrics AND deviating instances.
-  Metrics within normal range are completely omitted — no bullet, no "within
-  parameters" comment, no mention. Instances within normal range are completely
-  omitted — no bullet, not even a "no issue" note. A region with zero deviations
-  shows only its Grafana link.
-- **FINDING FORMAT**: follow the FINDING FORMAT rule above for every bullet.
+  processed with the GENERIC DEVIATION → REFERENCE SCALAR + CHART rule.
+- **SILENCE RULE**: see `references/common-patterns.md`.
+- **FINDING FORMAT**: see `references/common-patterns.md`.
   Each bullet = `<instance>: <metric/code> peak <value> <unit> at <timestamp>`.
-  No AZ/type tags. No threshold values. No editorial commentary.
-- **GRAFANA LINKS**: use the GRAFANA LINK FORMAT rule for every per-region
-  Grafana link — append `&var-region=<region>&from=<ms>&to=<ms>`.
-- Host Details: build the table from the PromQL result with the REAL returned
-  values; never screenshot it and NEVER emit `[TODO]`/placeholder cells. If the
-  Grafana MCP is unavailable, emit a warning panel instead of an empty table.
-  After building the table, run the sprint-start vs sprint-end delta check and
-  emit brief one-line notes as paragraphs AFTER the table for any detected
-  version/instance_type change; if no change detected, emit nothing. Never put
-  notes inside table rows.
+- **GRAFANA LINKS**: see `references/common-patterns.md`.
+- Host Details: build from PromQL result with REAL values; NEVER emit `[TODO]`/placeholder cells.
+  Run sprint-start vs sprint-end delta check; emit one-line notes AFTER the table for changes.
 - Do not invent versions, instance types, values, dates, or deviations.
-- For each deviating metric, emit the reference scalar (`Reference = N.NN unit`)
-  AND a chart that shows the deviation (overview + zoom per event). No deviation
-  tables. This applies to all metrics, generalising the Error Rates example.
-- Chart generation: matplotlib via bash_tool (no get_panel_image).
-  - All data lines (instances, error codes, series): **solid** (`linestyle="-"`).
-  - Reference line: always **dotted** (`linestyle=":", color="red"`), labelled
-    `Reference = N.NN {unit}`.
-  - For Error Rates: global chart shows one solid line per (instance, code);
-    zoom charts are **bar charts** (X = account/xheader, Y = error codes count).
-  - For other metrics: global chart = full sprint + all series (solid lines,
-    single axis). Zoom window = [peak_start−30m, peak_END+30m].
-  - Spike detection picks which series deviated. Report only deviating series in
-    the prose. Verify each PNG before upload. Save raw JSON to /tmp and
-    json.load it (no retyping). Upload via
-    `mcp__atlassian__confluence_upload_attachments` (Desktop) or REST +
-    `$ATLASSIAN_API_TOKEN` (POST .../child/attachment) and embed via
-    `ac:image`+`ri:attachment` (storage) — NOT ADF mediaSingle/data-id.
-  - Embed charts with **no caption** — no surrounding `<p><em>…</em></p>` label.
-  - **All embedded images MUST use `ac:align="center" ac:width="950"` — never
-    omit `ac:align="center"` or the image will be left-aligned in Confluence.**
+- For each deviating metric: emit the reference scalar AND a chart (overview + zoom per event).
+  Charts: matplotlib via bash_tool. All data lines solid (`linestyle="-"`). Reference line dotted
+  (`linestyle=":", color="red"`). No caption on embedded images.
+- Image alignment: see `references/common-patterns.md` — Image Alignment Rule.
+- No-TODO / fallback: see `references/common-patterns.md` — No-TODO Rule.
+- Publish: see `references/common-patterns.md` — Storage-Only Publish Rule.
