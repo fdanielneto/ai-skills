@@ -3,12 +3,7 @@
 Owns the first content section of the page. Mirrors the exact structure used
 in existing Production Meeting pages (IC260522, IC260508, IC260424).
 
-> FORMAT: use **storage format** (`representation: "storage"`) for the whole
-> page. Do NOT use `atlas_doc_format` (ADF) — mixing ADF `mediaSingle` (charts)
-> with ADF `blockCard`/`panel` breaks Confluence rendering (confirmed bug).
-> In storage format, `blockCard` is expressed as an `<a data-datasource="...">`
-> element and `panel` as `<ac:structured-macro ac:name="info">` — both work
-> correctly alongside `<ac:image>` chart embeds.
+> Publish format: storage only. See `references/common-patterns.md` — Storage-Only Publish Rule.
 
 ---
 
@@ -44,20 +39,8 @@ Storage shape:
 
 ### 3. Live issue list (storage blockCard — Custom Jira Charts datasource)
 
-> FORMAT: this is published in **storage format**, so the live Jira table is a
-> single `<a … data-card-appearance="block" data-datasource="{…}">` element
-> (NOT ADF JSON, NOT a plain link, NOT a static table). This is the exact markup
-> that rendered correctly in the working run (v47, confirmed in incognito).
->
-> **EDITOR-NATIVE STRUCTURE (MANDATORY):** the card MUST be wrapped with an
-> empty `<p local-id="…"/>` paragraph immediately before AND after the `<a>`.
-> Without these wrapper paragraphs the storage→ADF parser does not register the
-> `<a>` as a proper top-level blockCard node — the Custom Jira Charts app "fails
-> to get context" and renders nothing (confirmed bug, v46 regression).
-> Generate 3 fresh UUID v4s per run: one for the `<p>` before, one for the `<a>`
-> `local-id`, one for the `<p>` after.
-> Attribute order on `<a>` MUST be: `href, data-layout, local-id,
-> data-card-appearance, data-datasource` (matches editor-saved pages).
+> blockCard wrapper structure and attribute order: see `references/publish.md` — blockCard wrapper structure.
+> Generate **3 fresh UUID v4s** per run. Never reuse local-ids from a previous run.
 
 ```html
 <p local-id="<generate-fresh-uuid-v4>" />
@@ -106,20 +89,10 @@ Key values (do not modify):
 ---
 
 ## Rules
-- NEVER build a static or manual table for the issue list, and NEVER emit a plain
-  paragraph (e.g. "Ops Improvement Actions — production-meetings-interconnect")
-  in its place. That plain-text degradation was the v38 bug — it happens when the
-  page is published through the MCP html path instead of REST + storage. Always
-  emit the storage blockCard above and publish via REST + storage.
-- Do NOT emit a bare URL link to the JQL filter as the visible content — the
-  blockCard (which carries the URL as its href) replaces it.
+- NEVER build a static or manual table for the issue list. Never emit a plain paragraph in its place (that is the v38 bug — it happens when publishing via MCP html instead of REST + storage).
+- Do NOT emit a bare URL link to the JQL filter — the blockCard (which carries the URL as its href) replaces it.
 - Do NOT use ADF `atlas_doc_format` JSON for this node — storage `<a>` only.
-- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it.**
-  Omitting either paragraph causes the datasource app to "fail to get context"
-  and render a blank (confirmed regression; fixed in v47).
-- Always generate **3 fresh UUID v4s** per run: one for each `<p>` and one for
-  the `<a local-id>`. Never reuse local-ids from a previous run.
-- Attribute order on `<a>`: `href, data-layout, local-id, data-card-appearance,
-  data-datasource` — match the editor-saved page order exactly.
-- When constructing the full ADF doc, wrap all section nodes inside the top-level
-  `{ "version": 1, "type": "doc", "content": [...] }` envelope.
+- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it** (see `references/publish.md` — blockCard wrapper structure).
+- Always generate **3 fresh UUID v4s** per run. Never reuse local-ids from a previous run.
+- Attribute order on `<a>`: `href, data-layout, local-id, data-card-appearance, data-datasource`.
+- Storage-only publish: see `references/common-patterns.md` — Storage-Only Publish Rule.

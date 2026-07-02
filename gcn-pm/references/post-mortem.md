@@ -2,9 +2,7 @@
 
 Owns the Post-Mortem section. Mirrors the example page (IC260522).
 
-> FORMAT: use **storage format** (`representation: "storage"`) for the whole
-> page. Same reason as Status Review — do NOT use ADF (`atlas_doc_format`).
-> `blockCard` and `panel` work correctly in storage format without conflicts.
+> Publish format: storage only. See `references/common-patterns.md` — Storage-Only Publish Rule.
 
 ---
 
@@ -36,22 +34,9 @@ Storage `info` macro wrapping a `<ul>`. Bullet text verbatim:
 
 ### 3. Live incident list (storage blockCard — Custom Jira Charts datasource)
 
-> FORMAT: published in **storage format**, so the live Jira table is a single
-> `<a … data-card-appearance="block" data-datasource="{…}">` element — the exact
-> markup that rendered correctly in v47 (confirmed in incognito). NOT ADF JSON,
-> NOT a plain paragraph, NOT a static table.
->
-> **EDITOR-NATIVE STRUCTURE (MANDATORY):** the card MUST be wrapped with an
-> empty `<p local-id="…"/>` paragraph immediately before AND after the `<a>`.
-> Without these wrapper paragraphs the storage→ADF parser does not register the
-> `<a>` as a proper top-level blockCard node — the Custom Jira Charts app "fails
-> to get context" and renders nothing (confirmed bug, v46 regression, fixed v47).
-> Generate 3 fresh UUID v4s per run: one for the `<p>` before, one for the `<a>`
-> `local-id`, one for the `<p>` after.
-> Attribute order on `<a>` MUST be: `href, data-layout, local-id,
-> data-card-appearance, data-datasource` (matches editor-saved pages).
-
-JQL: TD Incidents from the last 90 days assigned to the Interconnect team.
+> blockCard wrapper structure and attribute order: see `references/publish.md` — blockCard wrapper structure.
+> Generate **3 fresh UUID v4s** per run. Never reuse local-ids from a previous run.
+> JQL: TD Incidents from the last 90 days assigned to the Interconnect team.
 
 ```html
 <p local-id="<generate-fresh-uuid-v4>" />
@@ -78,16 +63,9 @@ Key values (do not modify):
 ---
 
 ## Rules
-- NEVER build a static table for the incident list, and NEVER emit a plain
-  paragraph (e.g. "TD Incidents — last 90 days (Interconnect team)") in its
-  place — that is the v38 degradation caused by publishing via MCP html instead
-  of REST + storage. Always emit the storage blockCard and publish via REST +
-  storage.
+- NEVER build a static table for the incident list. Never emit a plain paragraph in its place (that is the v38 degradation caused by publishing via MCP html instead of REST + storage).
 - Do NOT use ADF `atlas_doc_format` JSON for this node — storage `<a>` only.
-- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it.**
-  Omitting either paragraph causes the datasource app to "fail to get context"
-  and render a blank (confirmed regression; fixed in v47).
-- Always generate **3 fresh UUID v4s** per run: one for each `<p>` and one for
-  the `<a local-id>`. Never reuse local-ids from a previous run.
-- Attribute order on `<a>`: `href, data-layout, local-id, data-card-appearance,
-  data-datasource` — match the editor-saved page order exactly.
+- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it** (see `references/publish.md` — blockCard wrapper structure).
+- Always generate **3 fresh UUID v4s** per run. Never reuse local-ids from a previous run.
+- Attribute order on `<a>`: `href, data-layout, local-id, data-card-appearance, data-datasource`.
+- Storage-only publish: see `references/common-patterns.md` — Storage-Only Publish Rule.
