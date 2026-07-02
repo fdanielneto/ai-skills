@@ -100,10 +100,11 @@ For each region R:
    dashboard link. **Do not add any text.**
 
 ### GENERIC DEVIATION → REFERENCE SCALAR + CHART rule
+### GENERIC DEVIATION & CHART GENERATION
 
-> Identical to the rule defined in `references/xcc-metrics.md`. Follow that
-> file's algorithm verbatim, substituting `rtpengine-{region}-{metric-slug}`
-> file name slugs and `rtpengine-datasources.md` metric entries.
+> **IMPORTANT**: See `references/metric-analysis-engine.md` for the single source of truth on how to fetch data, compute deviations dynamically (RATE vs RESOURCE vs STATE), and the full Python script to generate charts in batch.
+
+> Follow the engine's instructions verbatim, using the metric definitions from `rtpengine-datasources.md`.
 
 ## Issue-group headings (bold) — RTP-Engine-driven shapes
 (Emit ONLY when the deviation exists; never invent or pre-fill these.)

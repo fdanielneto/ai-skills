@@ -36,10 +36,9 @@ When a metric deviates:
 
 ## Deviation Policy (Global)
 
-- Rate/count metrics: `max > mean + 3sigma` with metric floor when defined.
-- Resource metrics: sustained window above `median + 2xIQR`.
-- Alive/up metrics: gap longer than 5 minutes.
-- Absolute/session metrics: max above baseline median by > 25% and operationally significant.
+- RATE metrics: `Median + 3*MAD` with metric floor when defined. Never use `Mean + 3sigma`.
+- RESOURCE metrics: Percentile thresholds (e.g. `P95 > 80%`). Never use `Median + 2xIQR`.
+- STATE metrics: Alive gap > 5 mins, or Stepwise session increases (leaks).
 
 ## Datasource Conventions
 

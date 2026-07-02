@@ -103,7 +103,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
   - B — System: `cpu_usage_system{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}`
   - C — IOWait: `cpu_usage_iowait{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}`
   - D — Guest: `cpu_usage_guest{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}`
-- deviation: sprint median; flag sustained A+B > 80 % or median + 2×IQR.
+- deviation: type: RESOURCE — P95 > 80%.
 - unit: % CPU
 
 ### System Load — RTPEngine
@@ -117,7 +117,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
   - B — 5-min load: `system_load5{region="$region",instance=~"rtpengine-edge.*"}`
   - C — 15-min load: `system_load15{region="$region",instance=~"rtpengine-edge.*"}`
   - D — CPU count: `system_n_cpus{region="$region",instance=~"rtpengine-edge.*"}`
-- deviation: sprint median + 2×IQR for each load average.
+- deviation: type: RESOURCE — P95 > (CPU count * 0.8).
 - unit: load average (dimensionless)
 
 ### Memory Usage — RTPEngine
@@ -132,7 +132,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
   - C — Cached+Buffered: `mem_cached{region="$region",instance=~"rtpengine-edge.*"} + mem_buffered{region="$region",instance=~"rtpengine-edge.*"}`
   - D — Free: `mem_free{region="$region",instance=~"rtpengine-edge.*"}`
   - E — Swap used: `mem_swap_total{region="$region",instance=~"rtpengine-edge.*"} - mem_swap_free{region="$region",instance=~"rtpengine-edge.*"}`
-- deviation: sprint median; flag when mem_used / mem_total > 80 % or median + 2×IQR.
+- deviation: type: RESOURCE — P95 > 80%.
 - unit: bytes
 
 ### Network I/O — RTPEngine
@@ -144,7 +144,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
 - promql (2 series; both scoped to `region="$region"`, `instance=~"rtpengine-edge.*"`):
   - A — RX: `irate(net_bytes_recv{region="$region",instance=~"rtpengine-edge.*"}[5m]) * 8`
   - B — TX: `irate(net_bytes_sent{region="$region",instance=~"rtpengine-edge.*"}[5m]) * 8`
-- deviation: sprint median + 2×IQR for each direction.
+- deviation: type: RESOURCE — P95.
 - unit: bits/s
 
 ### ── Section: RTPEngine Media Details ───────────────────────────────────────
@@ -159,7 +159,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
   - A — Used: `sum(rtpengine_ports_used{region="$region",instance=~"rtpengine-edge.*",name="pub"}) by (name)`
   - B — Free: `sum(rtpengine_ports_free{region="$region",instance=~"rtpengine-edge.*",name="pub"}) by (name)`
   - C — Total: `sum(rtpengine_ports{region="$region",instance=~"rtpengine-edge.*",name="pub"}) by (name)`
-- deviation: flag when used / total > 80 % or sprint median + 2×IQR.
+- deviation: type: RESOURCE — used / total > 80%.
 - unit: count (ports)
 
 ### Media Sessions — by region
@@ -169,7 +169,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
 - status: active
 - datasource: prometheus
 - promql: `sum(rtpengine_sessions{type="own",region="$region",instance=~"rtpengine-edge.*",service=~".*"}) by (region,service)`
-- deviation: sprint median + 2×IQR; also flag sustained zero (full outage) or monotonic increase without matching decrease (session leak).
+- deviation: type: STATE — flag sustained zero or monotonic increase (leak).
 - unit: count (sessions)
 
 ### Media Sessions by Instance
@@ -179,7 +179,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
 - status: active
 - datasource: prometheus
 - promql: `rtpengine_sessions{type="own",region="$region",instance=~"rtpengine-edge.*",service=~".*"}`
-- deviation: per-instance sprint median + 2×IQR; flag if one instance diverges significantly from peers.
+- deviation: type: STATE — flag if one instance diverges significantly.
 - unit: count (sessions)
 
 ### Transcoding Media Sessions — by region

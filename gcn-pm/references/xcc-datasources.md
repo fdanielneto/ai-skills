@@ -49,8 +49,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
   - C — 5xx only: `sum by (instance) (rate(kamailio_core_rcv_replies_5xx{region="$region",role="edgerouter",service=~".*"}[5m]))`
   - D — 6xx only: `sum by (instance) (rate(kamailio_core_rcv_replies_6xx{region="$region",role="edgerouter",service=~".*"}[5m]))`
 - unit: SIP error replies / second
-- deviation: per (instance, code) — SPIKE if max > mean + 3σ AND max ≥ 0.05 err/s
-  (mean and σ computed over the full sprint window for each series individually).
+- deviation: type: RATE — Median + 3*MAD. Floor: 0.05 err/s.
 
 > PERFORMANCE CONSTRAINT: on `prometheus` via Grafana MCP, use 3600 s step for
 > the global chart; finer step only for zoom windows (60 s step times out).
@@ -70,7 +69,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
   - N — Outbound on-net: `sum by (instance) (rate(kamailio_kamailio_outbound_onnet_invites{region="$region",role="edgerouter",service=~".*"}[5m]))`
   - O — RTPEngine failures: `sum by (instance) (rate(kamailio_rtpengine_connection_failure{region="$region",role="edgerouter",service=~".*"}[5m]))`
   - P — SIP Rec calls: `sum by (instance) (rate(kamailio_siprec_calls{region="$region",role="edgerouter",service=~".*"}[5m]))`
-- deviation: mean ± 3σ per instance over sprint window; floor TBD per metric.
+- deviation: type: RATE — Median + 3*MAD.
 - unit: events / second per instance
 
 > Fleet aggregate variant: same metrics without `by (instance)` — use `sum(...)`.
@@ -105,7 +104,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
   - B — System: `cpu_usage_system{region="$region",role=~"edgerouter",cpu="cpu-total"}`
   - C — IOWait: `cpu_usage_iowait{region="$region",role=~"edgerouter",cpu="cpu-total"}`
   - D — Guest: `cpu_usage_guest{region="$region",role=~"edgerouter",cpu="cpu-total"}`
-- deviation: sprint median; flag sustained A+B > 80 % or median + 2×IQR.
+- deviation: type: RESOURCE — P95 > 80%.
 - unit: % CPU
 
 ### System Load — Kamailio
@@ -118,7 +117,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
   - B — 5-min load: `system_load5{region="$region",role=~"edgerouter"}`
   - C — 15-min load: `system_load15{region="$region",role=~"edgerouter"}`
   - D — CPU count: `system_n_cpus{region="$region",role=~"edgerouter"}`
-- deviation: sprint median + 2×IQR for each load average (normalize by CPU count).
+- deviation: type: RESOURCE — P95 > (CPU count * 0.8).
 - unit: load average (dimensionless)
 
 ### CPU Usage per Process — Kamailio
@@ -150,7 +149,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
   - C — Cached+Buffered: `mem_cached{region="$region",role=~"edgerouter"} + mem_buffered{region="$region",role=~"edgerouter"}`
   - D — Free: `mem_free{region="$region",role=~"edgerouter"}`
   - E — Swap used: `mem_swap_total{region="$region",role=~"edgerouter"} - mem_swap_free{region="$region",role=~"edgerouter"}`
-- deviation: sprint median; flag when mem_used / mem_total > 80 % or median + 2×IQR.
+- deviation: type: RESOURCE — P95 > 80%.
 - unit: bytes
 
 ### Network I/O — Kamailio
@@ -161,7 +160,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
 - promql (2 series; both scoped to `region="$region"`, `role=~"edgerouter"`):
   - A — RX: `irate(net_bytes_recv{region="$region",role=~"edgerouter"}[5m]) * 8`
   - B — TX: `irate(net_bytes_sent{region="$region",role=~"edgerouter"}[5m]) * 8`
-- deviation: sprint median + 2×IQR for each direction.
+- deviation: type: RESOURCE — P95.
 - unit: bits/s
 
 ### Number of File Handles — Kamailio
@@ -207,7 +206,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
 - status: active
 - datasource: prometheus
 - promql: `rate(kamailio_rtpengine_connection_failure{region="$region",role=~"edgerouter"}[5m]) * 1000`
-- deviation: flag any sustained non-zero failure rate (mean ± 3σ; floor = 0.001).
+- deviation: type: RATE — Median + 3*MAD. Floor: 0.001.
 - unit: failures/s × 1000
 
 > NOTE: `$__range` in the following SIP Codes and Requests sections is a Grafana
