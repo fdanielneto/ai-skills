@@ -48,8 +48,8 @@ This skill is manual. Only proceed when the user explicitly invokes it
    matching section reference file, plus `references/common-patterns.md` when
    relevant and `references/output-schema.md` when relevant.
 3. Load `references/publish.md` only at the publish step — not before.
-4. Load `references/sbc-collection-prompts.md` only when Playwright is confirmed
-   available and collection is about to begin.
+4. Load `references/sbc-api-payloads.md` when collection is about to begin.
+5. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the `kibana-prd_execute_kb_api` queries and format the results as Native Confluence Chart XML macros.
 
 ## HELP MODE
 

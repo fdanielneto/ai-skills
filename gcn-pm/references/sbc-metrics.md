@@ -11,72 +11,41 @@ All region/Ribbon dropdowns are collapsed-by-default expand macros.
 
 ## DATA COLLECTION
 
-### Source — single Kibana CDR dashboard via Playwright MCP
+### Source — Kibana Proxy API (Elasticsearch)
 
-Call records live in `kibana-logging.svc.talkdeskapp.com`. CDR data collection
-uses **Playwright** to navigate **one single dashboard** for the WHOLE section.
+Call records live in `kibana-logging.svc.talkdeskapp.com`. Data collection is performed 
+using the Kibana Proxy API to execute raw Elasticsearch `_search` queries against the `logs-td-ribbonsbc-cdr*` index.
 
-#### `SBC_DASHBOARD_URL` (the only URL used by this section)
+This guarantees fast execution, minimal token usage, and 100% resilience against UI changes or browser timeouts.
 
-```
-https://kibana-logging.svc.talkdeskapp.com/app/dashboards#/view/97c532ef-3354-4392-a153-141a02816e90?_g=(filters:!(),refreshInterval:(pause:!t,value:0),time:(from:'<START_SPRINT_DATE>T00:00:00.000Z',to:'<END_SPRINT_DATE>T23:59:59.000Z'))
-```
+### Region → SBC Map
 
-- `<START_SPRINT_DATE>` / `<END_SPRINT_DATE>` = the sprint window (ISO `YYYY-MM-DD`).
-- All panels read by this section live on THIS dashboard:
-  `Total Call Attempts (all)`, `Total Media Anchoring Calls (all)`,
-  `Call Disconnect Reason (all)`, `Call Disconnect Reason - Table (all)`,
-  `Call Attempts`.
+Each sub-region corresponds to exactly **one SBC**. Filters in §B must use the 
+**`Gateway Name.keyword`** (the SBC name), NOT `region.keyword` — because both LATAM SBCs share `sa-east-1`.
 
-#### Shared panel-interaction pattern (MANDATORY — fast, single page load)
-
-Load the dashboard **once per pass**, then operate panel-by-panel without
-reloading. For each panel: apply KQL → click **Update** → wait on
-`textGone="Search session loading"` → maximize → capture → minimize → clear
-KQL bar. Never reload between panels.
-
-> DEFAULT FILTER NOTE (verified live): the dashboard already ships with a saved
-> filter pill `NOT Record Type.keyword: START`. So A-1 and A-3 (which only need
-> that default) usually require NO extra KQL — confirm the pill is present and
-> read the panels directly. Only type `NOT Record Type.keyword : "START"` in the
-> KQL bar if the pill is missing. A-2 and §B/§B-1 still type their own KQL on top.
-
-### Region → SBC → Kibana filter map
-
-Each sub-region corresponds to exactly **one SBC**. Filter in §B and §B-1 by
-**`Gateway Name.keyword`** (the SBC name), NOT by `region.keyword` — because
-both LATAM SBCs share `sa-east-1`.
-
-| Region             | Ribbon  | SBC name (`Gateway Name.keyword`) | `region.keyword` (ref) |
-|--------------------|---------|-----------------------------------|------------------------|
-| EU-South-1         | EU      | `PRDEUS1RSBC`      | `eu-south-1`            |
-| EU-West-3          | EU      | `PRDEUW3RSBC`      | `eu-west-3`             |
-| US-East-1          | US      | `prduse1rsbc`      | `us-east-1`             |
-| US-West-2          | US      | `prdusw2rsbc`      | `us-west-2`             |
-| AP1 - Singapore    | APAC    | `PRDAPS1RSBC`      | `ap-southeast-1`        |
-| AP2 - Sydney       | APAC    | `PRDAPS2RSBC`      | `ap-southeast-2`        |
-| LATAM-AZ1 (São Paulo) | LATAM | `PRDSAE1RSBC1`   | `sa-east-1`             |
-| LATAM-AZ2 (São Paulo) | LATAM | `PRDSAE1RSBC2`   | `sa-east-1`             |
+| Region             | Ribbon  | SBC name (`Gateway Name.keyword`) |
+|--------------------|---------|-----------------------------------|
+| EU-South-1         | EU      | `PRDEUS1RSBC`                     |
+| EU-West-3          | EU      | `PRDEUW3RSBC`                     |
+| US-East-1          | US      | `prduse1rsbc`                     |
+| US-West-2          | US      | `prdusw2rsbc`                     |
+| AP1 - Singapore    | APAC    | `PRDAPS1RSBC`                     |
+| AP2 - Sydney       | APAC    | `PRDAPS2RSBC`                     |
+| LATAM-AZ1 (São Paulo) | LATAM | `PRDSAE1RSBC1`                  |
+| LATAM-AZ2 (São Paulo) | LATAM | `PRDSAE1RSBC2`                  |
 
 ### Collection rules
 
-1. **If the Playwright MCP is available:**
+Load `references/sbc-api-payloads.md` and execute the collection tasks using the `kibana-prd_execute_kb_api` tool.
 
-   Load `references/sbc-collection-prompts.md` and follow the collection prompts
-   defined there (A-1, A-2, A-3, B-1, and per-SBC template), in that order.
-   Reuse the same loaded dashboard page for every panel — never reload between panels.
+**CRITICAL: ISOLATION BY SUBAGENT**
+To prevent context bloat, act as an orchestrator and launch **one isolated subagent per task**:
+- 1 subagent for A-1 and A-3 (combined)
+- 1 subagent for A-2 (Global Reasons)
+- 1 subagent for EACH Ribbon in B-1 (4 subagents total)
+- 1 subagent for EACH SBC timeline chart in B-2 (8 subagents total)
 
-   **Screenshot integrity check (MANDATORY after all 7/8 region screenshots):**
-   Compute the MD5/SHA-256 hash of each file and assert every file has a distinct
-   hash. If two files share a hash, the KQL filter was not applied — discard and
-   re-run those regions. See `references/sbc-collection-prompts.md` for the full
-   check command.
-
-2. **If the Playwright MCP is NOT available:** emit, per block, the dashboard
-   link (`SBC_DASHBOARD_URL`) plus a `warning` panel:
-   *"Live CDR data requires Kibana access via browser (Playwright). Playwright is
-   unavailable in this environment."*
-   Never `[TODO]` text. (See `references/common-patterns.md` — No-TODO Rule.)
+Wait for each subagent to execute its API calls and return ONLY the final scalar value, Markdown table, or Confluence XML macro.
 
 > PII rule: never fabricate CALL_IDs, account names, phone numbers or IPs.
 > Keep raw identifiers redacted; use the dashboards as the source of truth.
@@ -85,10 +54,8 @@ both LATAM SBCs share `sa-east-1`.
 
 ## A. Executive Summary
 
-A single heading (H1) that is itself a link to the Kibana overview dashboard
-(`SBC_DASHBOARD_URL`, with the sprint dates substituted):
-
-**[Executive Summary](SBC_DASHBOARD_URL)**
+A single heading (H1) that links to the Kibana overview dashboard:
+**[Executive Summary](https://kibana-logging.svc.talkdeskapp.com/app/dashboards#/view/97c532ef-3354-4392-a153-141a02816e90?_g=(filters:!(),refreshInterval:(pause:!t,value:0),time:(from:'<START_SPRINT_DATE>T00:00:00.000Z',to:'<END_SPRINT_DATE>T23:59:59.000Z')))**
 
 Immediately after the heading-link, emit **exactly one** plain sentence:
 
@@ -96,7 +63,7 @@ Immediately after the heading-link, emit **exactly one** plain sentence:
 Total: <N> completed calls.
 ```
 
-- `<N>` = total STOP-record call count for the sprint (collected from Kibana).
+- `<N>` = total STOP-record call count for the sprint (collected from Kibana API).
 - Use comma-separated thousands (e.g. `2,365,167`).
 
 Then emit the following three content blocks **in this exact order**:
@@ -108,7 +75,7 @@ Then emit the following three content blocks **in this exact order**:
 
 Emit a visible **H3 heading**: `Total Call Attempts & Media Anchoring`
 
-> Collection prompt: see `references/sbc-collection-prompts.md` § A-1.
+> Collection prompt: see `references/sbc-api-payloads.md` § A-1 & A-3.
 
 Render the resulting two-row table in storage format on the page.
 
@@ -118,20 +85,15 @@ Render the resulting two-row table in storage format on the page.
 
 Emit a visible **H3 heading**: `Call Disconnect Reason (all regions)`
 
-> Collection prompt: see `references/sbc-collection-prompts.md` § A-2.
+> Collection prompt: see `references/sbc-api-payloads.md` § A-2.
 
-Upload the resulting PNG as a page attachment and embed:
-```xml
-<ac:image ac:align="center" ac:width="950">
-  <ri:attachment ri:filename="sbc-call-disconnect-reason-without-16.png"/>
-</ac:image>
-```
+Embed the resulting native Confluence Pie Chart XML macro (generated by the subagent) directly into the page.
 
 ---
 
 ### A-3. Call Disconnect Reason (all regions) — Top 10
 
-> Collection prompt: see `references/sbc-collection-prompts.md` § A-3.
+> Collection prompt: see `references/sbc-api-payloads.md` § A-1 & A-3.
 
 Render the resulting table in storage format on the page.
 
@@ -141,8 +103,8 @@ Render the resulting table in storage format on the page.
 
 1. Heading (H1): **Detailed data by Region**
 
-2. Grouped by Ribbon (H2), in order: **Ribbon EU, Ribbon US, Ribbon APAC,
-   Ribbon LATAM**. Region membership:
+2. Grouped by Ribbon (H2), in order: **Ribbon EU, Ribbon US, Ribbon APAC, Ribbon LATAM**.
+   Region membership:
    - Ribbon EU   → EU-South-1, EU-West-3
    - Ribbon US   → US-East-1, US-West-2
    - Ribbon APAC → AP1 - Singapore, AP2 - Sydney
@@ -152,9 +114,7 @@ Render the resulting table in storage format on the page.
 
 Rendered **once** at the top of §B, before any per-region dropdown.
 
-Four mini-tables in two rows of two via `<ac:layout>` with `two_equal` sections
-— EU and US side-by-side in the first row, APAC and LATAM side-by-side in the
-second row.
+Four mini-tables in two rows of two via `<ac:layout>` with `two_equal` sections.
 
 Layout structure (storage format):
 ```xml
@@ -183,44 +143,22 @@ Each mini-table structure:
 - Second row: `Total calls (STOP)` → total STOP count (no percentage).
 - Remaining rows: one per disconnect code, ordered by count descending,
   `<Reason Name> (<code>)` → `<count> (<pct>%)`, pct = one decimal place.
-- **Font size:** wrap each mini-table in
-  `<div style="font-size: 0.85em;">…</div>`.
+- **Font size:** wrap each mini-table in `<div style="font-size: 0.85em;">…</div>`.
 
-> Collection prompt: see `references/sbc-collection-prompts.md` § B-1.
-> Run 4 times (once per Ribbon: EU, US, APAC, LATAM) using the Ribbon → SBC pair
-> mapping defined there.
+> Collection prompt: see `references/sbc-api-payloads.md` § B-1.
 
 ---
 
-3. For **each sub-region**, an expandable dropdown (sub-region name as title).
+### B-2. Per-region Call Attempts (Timeline Chart)
 
-   **With Playwright:**
-   One screenshot of the **"Call Attempts"** panel for that sub-region, using the
-   per-SBC collection prompt template in `references/sbc-collection-prompts.md`.
+For **each sub-region**, an expandable dropdown (sub-region name as title).
 
-   > SELECTOR NOTE (verified on the live dashboard): the panel is **displayed**
-   > as "Call Attempts", but its underlying `data-title` is
-   > `Average Call Service Duration (all) - Chart`. Use
-   > `[data-title="Average Call Service Duration (all) - Chart"]`.
-   > `[data-title="Call Attempts"]` does NOT exist.
-
-   After capturing, upload the PNG as a page attachment and embed:
-   ```xml
-   <ac:image ac:align="center" ac:width="950">
-     <ri:attachment ri:filename="sbc-<FILTER>-<TIMESTAMP>.png"/>
-   </ac:image>
-   ```
-
-   **Without Playwright:** dashboard link + warning panel:
-   *"Live CDR data requires Kibana access via browser (Playwright). Playwright is
-   unavailable in this environment."*
+Inside the dropdown, embed the native Confluence Line Chart XML macro (generated by the subagent using `references/sbc-api-payloads.md` § B-2).
 
 ---
 
 ## Notes
 - Image alignment: see `references/common-patterns.md` — Image Alignment Rule.
 - No-TODO / fallback: see `references/common-patterns.md` — No-TODO Rule.
-- The Disconnect Codes by Region tables (§B-1) are placed at the top of §B,
-  before the per-region dropdowns.
+- The Disconnect Codes by Region tables (§B-1) are placed at the top of §B, before the per-region dropdowns.
 - Mirror example pages (IC260508 / IC260522) for per-Ribbon dashboard order.
-- All of Part B depends on Playwright. When unavailable, emit warning panels.
