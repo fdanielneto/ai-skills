@@ -83,7 +83,7 @@ When a metric deviates:
 
 For each region R:
 1. For each metric M in `references/rtpengine-datasources.md` (in section order):
-   - If `status: active`: run M's PromQL, apply M's deviation rule.
+   - If `status: active`: you MUST use the Two-Phase Fetch (Instant Phase 1, Range Phase 2) as strictly defined in `metric-analysis-engine.md`.
    - If `status: reference`: include the Grafana link; analyse visually if data
      is available; otherwise skip automated check.
    - If M is within normal range → **emit nothing for M**.

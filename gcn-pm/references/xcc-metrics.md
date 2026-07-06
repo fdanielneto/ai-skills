@@ -163,10 +163,10 @@ When a metric deviates:
 ### Per-region analysis algorithm (consumes xcc-datasources.md)
 
 > DATA SOURCE RULE: analyse ALL metrics listed in `xcc-datasources.md`, in
-> section order. For metrics with `status: active`, run the PromQL and apply
-> the deviation rule automatically. For metrics with `status: reference`, open
-> the Grafana link and include it in the report only if a deviation is visible;
-> skip the metric entirely if everything looks normal.
+> section order. For metrics with `status: active`, you MUST use the Two-Phase Fetch 
+> (Instant Phase 1, Range Phase 2) as strictly defined in `metric-analysis-engine.md`.
+> For metrics with `status: reference`, open the Grafana link and include it in the report 
+> only if a deviation is visible; skip the metric entirely if everything looks normal.
 
 > SILENCE RULE (global — overrides everything else): **publish ONLY deviating
 > metrics.** If a metric is within its normal range, emit nothing — no comment,
@@ -176,8 +176,8 @@ When a metric deviates:
 
 For each region R (scoped to `role="edgerouter", region="R"`):
 1. For each metric M in `xcc-datasources.md` (in section order):
-   - If `status: active`: run M's PromQL over the SPRINT window via
-     `grafana-mcp-prd:query_prometheus`, apply M's deviation rule.
+   - If `status: active`: run Phase 1 (`queryType: instant`) via `grafana-mcp-prd:query_prometheus`.
+     If a threshold is breached, run Phase 2 (`queryType: range`, `step: 3600`).
    - If `status: reference`: link the Grafana panel; analyse visually if data
      collection is wired; otherwise include the link and skip automated check.
    - If M is within normal range → **emit nothing for M**.

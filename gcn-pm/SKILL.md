@@ -44,11 +44,9 @@ This skill is manual. Only proceed when the user explicitly invokes it
 ## TOKEN EFFICIENCY POLICY (mandatory)
 
 1. Dispatch one subagent task per requested section token.
-2. Per subagent, include only: sprint dates, optional region filter, the one
-   matching section reference file, plus `references/common-patterns.md` when
-   relevant and `references/output-schema.md` when relevant.
+2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file. Instruct the subagent to use the `read` tool on-demand to load its specific reference file, `references/common-patterns.md`, and `references/output-schema.md`.
 3. Load `references/publish.md` only at the publish step — not before.
-4. Load `references/sbc-api-payloads.md` when collection is about to begin.
+4. Instruct subagents to load `references/sbc-api-payloads.md` on-demand when collection is about to begin.
 5. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the `kibana-prd_execute_kb_api` queries and format the results as Native Confluence Chart XML macros.
 
 ## HELP MODE
