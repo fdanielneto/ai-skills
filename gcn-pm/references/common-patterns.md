@@ -72,3 +72,54 @@ Never use the Atlassian MCP tools `updateConfluencePage` / `createConfluencePage
 — those tools cannot emit storage format and silently degrade the page
 (blockCards → plain text, macros → bullet lists). See `references/publish.md`
 for the full canonical publish path.
+# Output Schema (Subagent Contract)
+
+Use this contract to emit section content only. Do not emit orchestration,
+publishing, rationale, or repeated rule text.
+
+## section_xcc_metrics
+
+Required order:
+1. `H1: XCC Metrics`
+2. Expand: `XCC - Host Details`
+  - one table with columns: `XCC | Version | Instance Type`
+  - optional short note paragraphs after the table for detected changes
+3. One collapsed region block per discovered region
+  - first line: region Grafana link
+  - then only deviating metric groups
+  - each deviating metric group:
+    - short bold heading
+    - `Reference = N.NN <unit>`
+    - bullet list in common finding format
+    - embedded chart image(s)
+
+Forbidden:
+- "within normal range" text
+- TODO placeholders
+- invented values
+- editorial/causal commentary
+
+## section_rtpengine_metrics
+
+Required order:
+1. `H1: RTP Engine Metrics`
+2. One collapsed region block per configured region/order
+  - first line: region Grafana link
+  - then only deviating metric groups
+  - each deviating metric group:
+    - short bold heading
+    - `Reference = N.NN <unit>`
+    - bullet list in common finding format
+    - embedded chart image(s)
+
+Forbidden:
+- "within normal range" text
+- TODO placeholders
+- invented values
+- editorial/causal commentary
+
+## Shared constraints
+
+- Follow `references/common-patterns.md` for links, silence rule, and bullets.
+- Emit only final section body content.
+- Keep wording short and factual.

@@ -44,11 +44,10 @@ This skill is manual. Only proceed when the user explicitly invokes it
 ## TOKEN EFFICIENCY POLICY (mandatory)
 
 1. Dispatch one subagent task per requested section token.
-2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file. Instruct the subagent to use the `read` tool on-demand to load its specific reference file, `references/common-patterns.md`, and `references/output-schema.md`.
+2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file. Instruct the subagent to use the `read` tool on-demand to load its specific reference file and `references/common-patterns.md`.
 3. GREP DIET FOR DATASOURCES: Subagents MUST NOT use `read` on `xcc-datasources.md` or `rtpengine-datasources.md`. They must use `bash` to run `grep -B 2 -A 7 "status: active" references/<file>` to load ONLY the active metrics and their PromQL into context.
 4. Load `references/publish.md` only at the publish step — not before.
-5. Instruct subagents to load `references/sbc-api-payloads.md` on-demand when collection is about to begin.
-6. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the `kibana-prd_execute_kb_api` queries and format the results as Native Confluence Chart XML macros.
+5. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the `kibana-prd_execute_kb_api` queries and format the results as Native Confluence Chart XML macros.
 
 ## HELP MODE
 
@@ -110,13 +109,13 @@ Case-insensitive; `-` and `_` are interchangeable.
 
 | Canonical token      | Reference file                     | Aliases                                  |
 |----------------------|------------------------------------|------------------------------------------|
-| `status-review`      | `references/status-review.md`      | status_review, status                    |
-| `on-call-alarms`     | `references/on-call-alarms.md`     | on_call_alarms, on-call, oncall, alarms  |
-| `post-mortem`        | `references/post-mortem.md`        | post_mortem, postmortem                  |
+| `status-review`      | `references/text-sections.md`      | status_review, status                    |
+| `on-call-alarms`     | `references/text-sections.md`      | on_call_alarms, on-call, oncall, alarms  |
+| `post-mortem`        | `references/text-sections.md`      | post_mortem, postmortem                  |
 | `xcc-metrics`        | `references/xcc-metrics.md`        | xcc_metrics, xcc, kamailio               |
 | `rtpengine-metrics`  | `references/rtpengine-metrics.md`  | rtpengine_metrics, rtpengine, rtp        |
 | `sbc-metrics`        | `references/sbc-metrics.md`        | sbc_metrics, sbc, calls                  |
-| `events-tracking`    | `references/events-tracking.md`    | events_tracking, events                  |
+| `events-tracking`    | `references/text-sections.md`      | events_tracking, events                  |
 | `all`                | (all of the above)                 | full, page                               |
 
 Unknown token → list the valid tokens and ask.
@@ -140,18 +139,18 @@ Publish algorithm (load `references/publish.md` at this step):
 
 ## SECTION → REFERENCE MAP
 
-Read the matching reference file before authoring each section.
+Read the matching reference file before authoring each section. For `text-sections.md`, read only the portion relevant to the requested section.
 
 | # | Page section                          | Reference file                       | Requested name    |
 |---|---------------------------------------|--------------------------------------|-------------------|
 | 0 | Header table + Table of Contents      | (this file — see STEP 0 below)       | —                 |
-| 1 | Status Review                         | `references/status-review.md`        | Status_Review     |
-| 2 | On-Call Alarms                        | `references/on-call-alarms.md`       | On-Call_Alarms    |
-| 3 | Post-Mortem (last 90 days)            | `references/post-mortem.md`          | Post-Mortem       |
+| 1 | Status Review                         | `references/text-sections.md`        | Status_Review     |
+| 2 | On-Call Alarms                        | `references/text-sections.md`        | On-Call_Alarms    |
+| 3 | Post-Mortem (last 90 days)            | `references/text-sections.md`        | Post-Mortem       |
 | 4 | XCC Metrics (Kamailio)                | `references/xcc-metrics.md`          | XCC_Metrics       |
 | 5 | RTP Engine Metrics                    | `references/rtpengine-metrics.md`    | RTPEngine_Metrics |
 | 6 | Executive Summary + Detailed data     | `references/sbc-metrics.md`          | SBC_Metrics       |
-| 7 | Events Tracking                       | `references/events-tracking.md`      | Events_Tracking   |
+| 7 | Events Tracking                       | `references/text-sections.md`        | Events_Tracking   |
 
 Design decisions (confirmed with requester):
 - XCC_Metrics and RTPEngine_Metrics are TWO SEPARATE sections.
