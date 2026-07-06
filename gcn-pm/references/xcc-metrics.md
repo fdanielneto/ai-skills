@@ -177,7 +177,7 @@ When a metric deviates:
 For each region R (scoped to `role="edgerouter", region="R"`):
 1. For each metric M in `xcc-datasources.md` (in section order):
    - If `status: active`: run Phase 1 (`queryType: instant`) via `grafana-mcp-prd:query_prometheus`.
-     If a threshold is breached, run Phase 2 (`queryType: range`, `step: 3600`).
+     If a threshold is breached, run Phase 2 (`queryType: range`, `step: 14400`) — EXCEPT for STATE metrics, which skip Phase 2.
    - If `status: reference`: link the Grafana panel; analyse visually if data
      collection is wired; otherwise include the link and skip automated check.
    - If M is within normal range → **emit nothing for M**.
@@ -191,7 +191,7 @@ For each region R (scoped to `role="edgerouter", region="R"`):
    REFERENCE SCALAR + CHART rule below):
    a. the **reference scalar** as plain text (`Reference = N.NN {unit}`);
    b. a **chart** of that metric over the sprint (solid data lines, dotted
-      reference line), and a zoom chart per spike event when applicable;
+      reference line), and a zoom chart per spike event when applicable (Omit charts for STATE metrics);
    c. the metric's Grafana link from the datasources file.
 4. If ALL metrics for a region are within normal range: the region block
    contains only the Grafana dashboard link. **Do not add any text.**

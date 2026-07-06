@@ -28,7 +28,10 @@ Delegate the calculation to the Prometheus server using the sprint duration (e.g
 For the few metrics that actually deviated in Phase 1, you must fetch the timeseries to plot the chart.
 You MUST enforce severe downsampling to keep the JSON small:
 * Execute a `queryType: range` via `grafana-mcp-prd:query_prometheus`.
-* **MANDATORY**: You MUST set `step: 3600` (1 hour) or higher. Never omit the `step` parameter. This reduces 4000 points to 336 points per series.
+* **NO STATE METRICS**: Do NOT run Phase 2 (do not generate charts) for STATE metrics (like "Alive" 0/1). For these, if Phase 1 flags a deviation, simply emit the text bullet point. A chart of a straight line with a single 0 is a waste of tokens.
+* **MANDATORY DOWNSAMPLING**: You MUST set `step: 14400` (4 hours). Never omit the `step` parameter. This reduces 4000 points to 84 points per series.
+* **PEAK PRESERVATION**: Because a 4-hour step hides short spikes, you MUST wrap the Phase 2 query in `max_over_time( (<original_promql>)[4h:5m] )`. This ensures the 4-hour data points still reflect the true peak of that window.
+* **INSTANCE FILTERING**: Do not download data for healthy instances. Inject a regex filter for ONLY the instances that deviated in Phase 1. E.g., if only `xcc-1` and `xcc-3` deviated, append `{instance=~"xcc-1|xcc-3"}` to the PromQL.
 
 ## 2. Python Script Template (Charting Only)
 Because Prometheus handles the heavy lifting in Phase 1, the Python script no longer computes MADs or Percentiles over raw data. It simply generates the charts for the Phase 2 downsampled data.
@@ -44,7 +47,7 @@ import datetime, sys
 def plot_deviating_metric(metric_name, json_path, unit, region, sprint_start, sprint_end, threshold_val, deviations):
     """
     Plots only the metrics confirmed as deviating in Phase 1.
-    json_path: Path to the Phase 2 (step=3600) range query JSON.
+    json_path: Path to the Phase 2 (step=14400) range query JSON.
     deviations: List of instance names that breached the threshold.
     """
     with open(json_path, 'r') as f:

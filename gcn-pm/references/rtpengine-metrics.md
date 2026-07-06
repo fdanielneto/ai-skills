@@ -94,7 +94,7 @@ For each region R:
    - **Transcoding sessions increase on <date>**
    - **No data until <date>** (series missing)
 3. For each flagged metric, emit `Reference = N.NN {unit}` (plain text, NO
-   table) and a **chart** that shows the deviation, plus the Grafana link —
+   table) and a **chart** that shows the deviation (skip chart for STATE metrics), plus the Grafana link —
    following the GENERIC DEVIATION → REFERENCE SCALAR + CHART rule below.
 4. If ALL metrics for a region are within normal range: emit only the Grafana
    dashboard link. **Do not add any text.**

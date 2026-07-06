@@ -45,9 +45,10 @@ This skill is manual. Only proceed when the user explicitly invokes it
 
 1. Dispatch one subagent task per requested section token.
 2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file. Instruct the subagent to use the `read` tool on-demand to load its specific reference file, `references/common-patterns.md`, and `references/output-schema.md`.
-3. Load `references/publish.md` only at the publish step — not before.
-4. Instruct subagents to load `references/sbc-api-payloads.md` on-demand when collection is about to begin.
-5. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the `kibana-prd_execute_kb_api` queries and format the results as Native Confluence Chart XML macros.
+3. GREP DIET FOR DATASOURCES: Subagents MUST NOT use `read` on `xcc-datasources.md` or `rtpengine-datasources.md`. They must use `bash` to run `grep -B 2 -A 7 "status: active" references/<file>` to load ONLY the active metrics and their PromQL into context.
+4. Load `references/publish.md` only at the publish step — not before.
+5. Instruct subagents to load `references/sbc-api-payloads.md` on-demand when collection is about to begin.
+6. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the `kibana-prd_execute_kb_api` queries and format the results as Native Confluence Chart XML macros.
 
 ## HELP MODE
 
