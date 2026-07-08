@@ -1,0 +1,116 @@
+RTPEngine Alive:
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/dfolpmd59gp34d?orgId=1
+  description: "RTPEngine alive stats \u2014 by RTPEngine instance (up/down via uptime\
+    \ seconds)"
+  purpose: verify all RTPEngine instances are up; flag any gap in aliveness
+  status: active
+  datasource: prometheus
+  promql: sgn(rtpengine_uptime_seconds{region="$region",instance=~"rtpengine-edge-.*",service=~".*"})
+  deviation: flag any gap (result = 0 or series absent) lasting > 5 min.
+  unit: binary 0/1
+"CPU Stats \u2014 RTPEngine":
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/afolptd75jklce?orgId=1
+  description: "CPU stats (user, system, iowait, guest) \u2014 by RTPEngine instance"
+  purpose: detect CPU pressure on RTPEngine instances; correlate with media session
+    load
+  status: active
+  datasource: prometheus
+  promql: ''
+  "A \u2014 User": cpu_usage_user{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}
+  "B \u2014 System": cpu_usage_system{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}
+  "C \u2014 IOWait": cpu_usage_iowait{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}
+  "D \u2014 Guest": cpu_usage_guest{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}
+  deviation: "type: RESOURCE \u2014 P95 > 80%."
+  unit: '% CPU'
+"System Load \u2014 RTPEngine":
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/bfolpty78t4hsa?orgId=1
+  description: "System load (1 m, 5 m, 15 m) and CPU count \u2014 by RTPEngine instance"
+  purpose: detect load spikes that may affect media processing
+  status: active
+  datasource: prometheus
+  promql: ''
+  "A \u2014 1-min load": system_load1{region="$region",instance=~"rtpengine-edge.*"}
+  "B \u2014 5-min load": system_load5{region="$region",instance=~"rtpengine-edge.*"}
+  "C \u2014 15-min load": system_load15{region="$region",instance=~"rtpengine-edge.*"}
+  "D \u2014 CPU count": system_n_cpus{region="$region",instance=~"rtpengine-edge.*"}
+  deviation: "type: RESOURCE \u2014 P95 > (CPU count * 0.8)."
+  unit: load average (dimensionless)
+"Memory Usage \u2014 RTPEngine":
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/afolpuk8l260wc?orgId=1
+  description: "Memory breakdown (total, used, cached+buffered, free, swap used) \u2014\
+    \ by RTPEngine instance"
+  purpose: detect memory pressure or leaks in RTPEngine processes
+  status: active
+  datasource: prometheus
+  promql: ''
+  "A \u2014 Total": mem_total{region="$region",instance=~"rtpengine-edge.*"}
+  "B \u2014 Used": mem_used{region="$region",instance=~"rtpengine-edge.*"}
+  "C \u2014 Cached+Buffered": mem_cached{region="$region",instance=~"rtpengine-edge.*"}
+    + mem_buffered{region="$region",instance=~"rtpengine-edge.*"}
+  "D \u2014 Free": mem_free{region="$region",instance=~"rtpengine-edge.*"}
+  "E \u2014 Swap used": mem_swap_total{region="$region",instance=~"rtpengine-edge.*"}
+    - mem_swap_free{region="$region",instance=~"rtpengine-edge.*"}
+  deviation: "type: RESOURCE \u2014 P95 > 80%."
+  unit: bytes
+"Network I/O \u2014 RTPEngine":
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/bfolpv3s713pca?orgId=1
+  description: "Network I/O in bits/s (receive and transmit) \u2014 by RTPEngine instance"
+  purpose: detect unusual media traffic volume; correlate with session counts
+  status: active
+  datasource: prometheus
+  promql: ''
+  "A \u2014 RX": irate(net_bytes_recv{region="$region",instance=~"rtpengine-edge.*"}[5m])
+    * 8
+  "B \u2014 TX": irate(net_bytes_sent{region="$region",instance=~"rtpengine-edge.*"}[5m])
+    * 8
+  deviation: "type: RESOURCE \u2014 P95."
+  unit: bits/s
+Media Ports:
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/ffolpybilo2kga?orgId=1
+  description: "RTPEngine media port usage (used, free, total) for public interface\
+    \ \u2014 all RTPEngine instances aggregated"
+  purpose: detect port exhaustion or unusual port allocation patterns
+  status: active
+  datasource: prometheus
+  promql: ''
+  "A \u2014 Used": sum(rtpengine_ports_used{region="$region",instance=~"rtpengine-edge.*",name="pub"})
+    by (name)
+  "B \u2014 Free": sum(rtpengine_ports_free{region="$region",instance=~"rtpengine-edge.*",name="pub"})
+    by (name)
+  "C \u2014 Total": sum(rtpengine_ports{region="$region",instance=~"rtpengine-edge.*",name="pub"})
+    by (name)
+  deviation: "type: RESOURCE \u2014 used / total > 80%."
+  unit: count (ports)
+"Media Sessions \u2014 by region":
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/afolpyyq6pam8b?orgId=1
+  description: "RTPEngine active media sessions (type=own) \u2014 aggregated by region\
+    \ and service"
+  purpose: "detect session count anomalies \u2014 sudden drops (call drops) or stuck\
+    \ sessions (leaks)"
+  status: active
+  datasource: prometheus
+  promql: sum(rtpengine_sessions{type="own",region="$region",instance=~"rtpengine-edge.*",service=~".*"})
+    by (region,service)
+  deviation: "type: STATE \u2014 flag sustained zero or monotonic increase (leak)."
+  unit: count (sessions)
+Media Sessions by Instance:
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/ffolpzjae43cwb?orgId=1
+  description: "RTPEngine active media sessions (type=own) \u2014 per RTPEngine instance"
+  purpose: detect per-instance imbalances or individual instance anomalies
+  status: active
+  datasource: prometheus
+  promql: rtpengine_sessions{type="own",region="$region",instance=~"rtpengine-edge.*",service=~".*"}
+  deviation: "type: STATE \u2014 flag if one instance diverges significantly."
+  unit: count (sessions)
+"Transcoding Media Sessions \u2014 by region":
+  grafana: https://grafana-general.svc.talkdeskapp.com/goto/afolq07ux3400f?orgId=1
+  description: "RTPEngine transcoding sessions \u2014 aggregated by region"
+  purpose: detect unexpected transcoding load (transcoding is CPU-heavy; spikes impact
+    capacity)
+  status: active
+  datasource: prometheus
+  promql: sum(rtpengine_transcoded_media{region="$region",instance=~"rtpengine-edge.*"})
+    by (region)
+  deviation: "sprint median + 2\xD7IQR; any sustained increase is noteworthy if transcoding\
+    \ is not expected."
+  unit: count (transcoding sessions)
