@@ -79,9 +79,7 @@ When a metric deviates:
 
 ## Per-region analysis algorithm (consumes Appendix: RTPEngine Data Sources)
 
-> SILENCE RULE: publish ONLY deviating metrics. If a metric is within normal
-> range, emit nothing for that metric. If ALL metrics are within range for a
-> region, the block contains only the Grafana link.
+> SILENCE RULE (UPDATED): **Publish only deviating metrics.** If a metric is within normal range, emit nothing for that metric. If ALL metrics are within range for a region, the block contains the Grafana link followed by: `No deviation detected ✅`.
 
 For each region R:
 1. For each metric M in the **Appendix: RTPEngine Data Sources** (in section order):
@@ -104,11 +102,11 @@ For each region R:
 ### GENERIC DEVIATION → REFERENCE SCALAR + CHART rule
 ### GENERIC DEVIATION & CHART GENERATION
 
-> **IMPORTANT**: See `references/metric-analysis-engine.md` for the single source of truth on how to fetch data, compute deviations dynamically (RATE vs RESOURCE vs STATE), and how to build static PNG charts from Phase 2 data using plot_helper.py.
+**CRITICAL**: You MUST use the `bash` tool to execute `scripts/grafana_analyzer.py` for each region, passing the `rtp_metrics.yaml` config. The script will handle fetching data, detecting deviations, generating PNGs, and outputting the exact HTML snippet.
 
-> Follow the engine's instructions verbatim, using the metric definitions from the **Appendix**.
+Example: `python3 scripts/grafana_analyzer.py /path/to/rtp_metrics.yaml 2026-06-10 2026-06-28 eu-south-1`
 
-> Use `scripts/plot_helper.py` to build static PNG charts from Phase 2 JSON and upload as attachments — see `metric-analysis-engine.md` §2.
+Your job is to run this script for each region and place its output inside the correct expandable block.
 
 ## Issue-group headings (bold) — RTP-Engine-driven shapes
 (Emit ONLY when the deviation exists; never invent or pre-fill these.)

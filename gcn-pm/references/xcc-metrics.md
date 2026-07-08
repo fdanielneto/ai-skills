@@ -174,11 +174,7 @@ When a metric deviates:
 > For metrics with `status: reference`, open the Grafana link and include it in the report 
 > only if a deviation is visible; skip the metric entirely if everything looks normal.
 
-> SILENCE RULE (global — overrides everything else): **publish ONLY deviating
-> metrics.** If a metric is within its normal range, emit nothing — no comment,
-> no bullet, no "within parameters" note. This applies per metric, not per
-> region. A region block with zero deviations contains only the Grafana
-> dashboard link (one line); no "no anomalies" text is needed.
+> SILENCE RULE (UPDATED): **Publish only deviating metrics.** If a metric is within its normal range, emit nothing. If ALL metrics for a region are within normal range, the region block contains the Grafana dashboard link followed by: `No deviation detected ✅`.
 
 For each region R (scoped to `role="edgerouter", region="R"`):
 1. For each metric M in the **Appendix: XCC Data Sources** (in section order):
@@ -214,12 +210,11 @@ When the engine script outputs a deviating metric chart, proceed to Step 3.
 
 #### Step 3 — Generate PNG Charts
 
-You MUST use `scripts/plot_helper.py` to generate chart PNGs from the Phase 2 JSON.
-Do NOT use Native Confluence Chart Macros.
-1. Format the data into the JSON structure expected by `plot_helper.py`.
-2. Generate the PNG.
-3. Upload it as an attachment to the page.
-4. Embed it using `<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="..."/></ac:image>`.
+**CRITICAL**: You MUST use the `bash` tool to execute `scripts/grafana_analyzer.py` for each region. The script will handle fetching data, detecting deviations, generating PNGs, and outputting the exact HTML snippet.
+
+Example: `python3 scripts/grafana_analyzer.py /path/to/xcc_metrics.yaml 2026-06-10 2026-06-28 eu-south-1`
+
+Your job is to run this script for each region and place its output inside the correct expandable block.
 
 ---
 

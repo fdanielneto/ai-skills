@@ -141,16 +141,16 @@ Each mini-table structure:
 
 ---
 
-### B-2. Per-region Call Attempts (Timeline Chart)
+### B-2. Per-SBC Call Attempts (Timeline Chart)
 
-For **each sub-region**, an expandable dropdown (sub-region name as title).
+For **each of the 8 individual SBCs**, an expandable dropdown (sub-region name as title, e.g., "EU-South-1").
 
-Inside the dropdown:
-1. Parse the JSON returned by sbc_analyzer.py.
-2. Format it into the JSON payload expected by `scripts/plot_helper.py`.
-3. Generate the PNG by running `scripts/plot_helper.py`.
-4. Upload the PNG as an attachment to the Confluence page.
-5. Embed it using `<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="..."/></ac:image>`.
+**CRITICAL**: You MUST run the query and generate the chart for EACH INDIVIDUAL SBC separately (8 total). The 'EU-South-1' dropdown should ONLY contain the chart for `PRDEUS1RSBC`. DO NOT group by Ribbon for this step.
+
+Inside each dropdown:
+1.  Use `bash` to execute `sbc_analyzer.py` with the correct SBC name.
+2.  The script will generate the PNG locally.
+3.  Embed the generated PNG using `<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="..."/></ac:image>`.
 
 ---
 
