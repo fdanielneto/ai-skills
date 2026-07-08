@@ -13,101 +13,63 @@ To prevent massive JSON ingest, data collection MUST follow a two-phase approach
 For every active metric, execute a single `queryType: instant` at `endTime: <sprint_end>`.
 Delegate the calculation to the Prometheus server using the sprint duration (e.g., `14d`) in the over-time function.
 
-* **RATE metrics (Bursty)**: Query the absolute peak.
-  `max_over_time( (<original_promql>)[14d:5m] )`
-  *Rule*: If the returned peak for an instance is BELOW the metric's defined floor (e.g., `0.05` err/s), **skip this metric entirely**. It did not deviate.
-* **RESOURCE metrics (Stable)**: Query the P95 directly.
-  `quantile_over_time( 0.95, (<original_promql>)[14d:5m] )`
-  *Rule*: If the returned P95 is BELOW the defined threshold (e.g., `80%`), **skip this metric entirely**.
-* **STATE metrics (Gaps/Leaks)**:
-  `min_over_time( (<original_promql>)[14d:5m] )` (to find 0s/gaps) or `delta( (<original_promql>)[14d:5m] )` (to find leaks).
+Each metric defines a **floor** — an absolute hard trigger value. Phase 1 follows a two-step flow:
 
-*Only metrics that breach their threshold in Phase 1 proceed to Phase 2.*
+1. **Floor bypass** (checked first):  
+   If the Phase 1 value meets or exceeds the metric's floor, the metric is **flagged as deviating immediately** — the statistical check is skipped.  
+2. **Fallback estatístico** (only if floor was not breached):  
+   Apply the metric's statistical deviation rule (Median + 3×MAD, P95 > threshold, IQR, etc.).
+
+| Type | Phase 1 query | Floor bypass condition | Fallback statistical rule |
+|---|---|---|---|
+| **RATE** (Bursty) | `max_over_time( (<original_promql>)[14d:5m] )` | `peak >= floor` → immediate flag | Median + 3×MAD |
+| **RESOURCE** (Stable) | `quantile_over_time(0.95, (<original_promql>)[14d:5m] )` | `P95 >= floor` → immediate flag | P95 > defined threshold % |
+| **STATE** (Gaps/Leaks) | `min_over_time( (<original_promql>)[14d:5m] )` or `delta(...)` | `value == 0` or gap → immediate flag | gap duration > 5 min |
+
+> Floor bypass overrides the fallback entirely. If the floor is breached, the metric proceeds directly to Phase 2 (charts) without running MAD, P95 comparison, IQR, or any other statistical rule.
+
+*Only metrics that breach either their floor or their statistical rule proceed to Phase 2.*
 
 ### Phase 2: Downsampled Fetch (Range Query) - ONLY for deviating metrics
 For the few metrics that actually deviated in Phase 1, you must fetch the timeseries to plot the chart.
 You MUST enforce severe downsampling to keep the JSON small:
 * Execute a `queryType: range` via `grafana-mcp-prd:query_prometheus`.
-* **NO STATE METRICS**: Do NOT run Phase 2 (do not generate charts) for STATE metrics (like "Alive" 0/1). For these, if Phase 1 flags a deviation, simply emit the text bullet point. A chart of a straight line with a single 0 is a waste of tokens.
+* **STATE METRICS EXCEPTIONS**: For strict binary states (like "Alive" 0/1), skip Phase 2. BUT for Failover metrics, Session counts, or other counters classified as STATE, you MUST run Phase 2 and generate a chart using `plot_helper.py`.
 * **MANDATORY DOWNSAMPLING**: You MUST set `step: 14400` (4 hours). Never omit the `step` parameter. This reduces 4000 points to 84 points per series.
 * **PEAK PRESERVATION**: Because a 4-hour step hides short spikes, you MUST wrap the Phase 2 query in `max_over_time( (<original_promql>)[4h:5m] )`. This ensures the 4-hour data points still reflect the true peak of that window.
 * **INSTANCE FILTERING**: Do not download data for healthy instances. Inject a regex filter for ONLY the instances that deviated in Phase 1. E.g., if only `xcc-1` and `xcc-3` deviated, append `{instance=~"xcc-1|xcc-3"}` to the PromQL.
 
-## 2. Python Script Template (Charting Only)
-Because Prometheus handles the heavy lifting in Phase 1, the Python script no longer computes MADs or Percentiles over raw data. It simply generates the charts for the Phase 2 downsampled data.
+## 2. Generate Static PNG Charts (replaces Native Confluence Macros)
 
-```python
-import json
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import datetime, sys
+> NEVER use Native Confluence Chart Macros (`<ac:structured-macro ac:name="chart">`). They cause severe `StaleStateException` crashes in Atlassian backend.
 
-def plot_deviating_metric(metric_name, json_path, unit, region, sprint_start, sprint_end, threshold_val, deviations):
-    """
-    Plots only the metrics confirmed as deviating in Phase 1.
-    json_path: Path to the Phase 2 (step=14400) range query JSON.
-    deviations: List of instance names that breached the threshold.
-    """
-    with open(json_path, 'r') as f:
-        payload = json.load(f)
-    
-    if 'data' not in payload or not payload['data']['result']:
-        return None
-        
-    series_data = {}
-    for result in payload['data']['result']:
-        metric_labels = result['metric']
-        instance = metric_labels.get('instance', metric_labels.get('xheader', 'aggregate'))
-        
-        # Only plot the instances that actually deviated
-        if instance not in deviations:
-            continue
-            
-        values = result['values']
-        y_vals = [float(v[1]) for v in values]
-        x_vals = [datetime.datetime.utcfromtimestamp(v[0]) for v in values]
-        series_data[instance] = (x_vals, y_vals)
-    
-    if not series_data:
-        return None
-        
-    # Generate Chart
-    fig, ax = plt.subplots(figsize=(11, 4))
-    
-    for inst, (xs, ys) in series_data.items():
-        ax.plot(xs, ys, linestyle="-", linewidth=1.2, label=inst)
-        
-    # Plot dotted line for the ACTUAL THRESHOLD that was breached
-    ax.axhline(threshold_val, color="red", linestyle=":", linewidth=1.2, label=f"Threshold = {threshold_val:.2f} {unit}")
-    
-    ax.set_title(f"{metric_name} — {region} · {sprint_start}–{sprint_end} (1h resolution)", fontsize=9)
-    ax.set_ylabel(unit)
-    ax.set_xlabel("UTC time")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H"))
-    ax.legend(fontsize=7, ncol=4)
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    
-    chart_slug = metric_name.lower().replace(' ', '-')
-    chart_path = f"/tmp/{region}-{chart_slug}-overview.png"
-    fig.savefig(chart_path, format="png", dpi=150)
-    plt.close(fig)
-    return chart_path
+For each deviating metric, you MUST use `scripts/plot_helper.py` to generate a static PNG chart.
+1. Format your Phase 2 JSON into the expected payload:
+   ```json
+   {
+     "lines": [
+       {
+         "label": "<INSTANCE_1>",
+         "points": [ {"x": "2026-06-15 10:00", "y": 12.3}, {"x": "2026-06-15 14:00", "y": 14.5} ]
+       }
+     ],
+     "threshold": {"label": "Threshold", "value": 10.0}
+   }
+   ```
+2. Call `scripts/plot_helper.py "<TITLE>" "/tmp/chart_output.png" "Date" "<UNIT>" '<json_payload>'`
+3. Upload `/tmp/chart_output.png` as an attachment to the Confluence page.
+4. Inline the image in your HTML output:
+   `<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="chart_output.png"/></ac:image>`
 
-# Example Usage generated by subagent:
-# plot_deviating_metric("4xx Error Rate", "/tmp/4xx_range.json", "err/s", "eu-south-1", "2026-06-01", "2026-06-15", 0.05, ["xcc-instance-1"])
-```
-
-## 3. Zoom Window Logic (Simplified)
-For any metric event that requires a zoom chart (e.g., error attribution):
-* Find the absolute peak timestamp across all instances for that event (can be found in Phase 1 if using `timestamp(max_over_time(...))` or derived from Phase 2).
-* The zoom window is fixed: `[peak_timestamp - 30 minutes, peak_timestamp + 30 minutes]`.
+## 3. Zoom Window Logic
+For metrics that require a zoom chart:
+* Find the peak timestamp from the Phase 2 rows (max value across deviating instances).
+* Filter rows to `[peak_timestamp - 30 min, peak_timestamp + 30 min]`.
+* Emit a second chart macro with the same structure, title suffix `— zoom <YYYY-MM-DDTHH:MMZ>`.
 
 ## 4. Reporting the Findings
 For each metric that deviated and produced a chart:
-* Print the reference scalar (the threshold breached): `Threshold breached = N.NN {unit}`.
-* Create a minimal bullet point per instance: `* <instance>: <metric> peak <value> <unit> at <YYYY-MM-DDTHH:MMZ>`.
-* Embed the chart using `ac:image` + `ri:attachment` (NO caption).
+* Emit `Reference = N.NN <unit>` as plain text (one line).
+* Emit one bullet per deviating instance: `* <instance>: <metric> peak <value> <unit> at <YYYY-MM-DDTHH:MMZ>`.
+* Inline the chart macro(s) immediately after the bullets (NO caption, NO surrounding paragraph).
 * Include the parameterized Grafana link.

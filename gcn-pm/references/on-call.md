@@ -1,15 +1,23 @@
-# Status_Review — "Status Review" section
+# On-Call — Meeting Ops Sections
 
-Owns the first content section of the page. Mirrors the exact structure used
-in existing Production Meeting pages (IC260522, IC260508, IC260424).
+This file owns the generation of 4 continuous sections in the Confluence page:
+1. Status Review
+2. On-Call Alarms
+3. Post-Mortem (last 90 days)
+4. Events Tracking
 
-> Publish format: storage only. See `references/common-patterns.md` — Storage-Only Publish Rule.
+The subagent must generate the complete storage HTML for the first 3 sections in order, and write it to its local output file (`output/section_oncall.html`).
+Then, it MUST write the 4th section (Events Tracking) into a SEPARATE file (`output/section_events_tracking.html`).
+
+> **STORAGE-ONLY PUBLISH RULE**: The generated HTML must be strictly Confluence Storage Format. Never use ADF JSON. 
+> **IMAGE ALIGNMENT RULE**: All `<ac:image>` tags MUST carry `ac:align="center"`. For On-Call Alarms screenshots use `ac:width="760"` (matches content area width).
+> **BLOCKCARD WRAPPER RULE**: Every Jira datasource blockCard MUST be wrapped with empty self-closing paragraphs carrying fresh `local-id` UUIDs. See `references/publish.md` for exact wrapper structure. Generate 3 fresh UUID v4s per run for each card.
 
 ---
 
-## Structure (in order)
+## 1. Status Review
 
-### 1. Heading
+Mirrors the exact structure used in existing Production Meeting pages.
 Storage `<h1>` — text: **"Status Review"**
 
 ```html
@@ -92,11 +100,13 @@ Key values (do not modify):
 - NEVER build a static or manual table for the issue list. Never emit a plain paragraph in its place (that is the v38 bug — it happens when publishing via MCP html instead of REST + storage).
 - Do NOT emit a bare URL link to the JQL filter — the blockCard (which carries the URL as its href) replaces it.
 - Do NOT use ADF `atlas_doc_format` JSON for this node — storage `<a>` only.
-- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it** (see `references/publish.md` — blockCard wrapper structure).
+- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it**.
 - Always generate **3 fresh UUID v4s** per run. Never reuse local-ids from a previous run.
 - Attribute order on `<a>`: `href, data-layout, local-id, data-card-appearance, data-datasource`.
-- Storage-only publish: see `references/common-patterns.md` — Storage-Only Publish Rule.
-# On-Call_Alarms — "On-Call Alarms" section
+- Must output in Confluence Storage format.
+---
+
+## 2. On-Call Alarms
 
 Owns the On-Call Alarms section.
 Column structure confirmed from the UCInterconnect template (page 5238128641).
@@ -244,11 +254,11 @@ Do **not** attempt to build any table or invent alert rows. Never emit `[TODO]`.
 - Responder ID `5b660e34-8c85-4c01-b3c5-c96d192300cf` = OnCall Interconnect.
 - Never invent or fabricate alert data.
 - If Playwright is unavailable, emit the warning panel and the plain link only — never `[TODO]`.
-# Post-Mortem — "Post-Mortem (last 90 days)" section
+---
+
+## 3. Post-Mortem (last 90 days)
 
 Owns the Post-Mortem section. Mirrors the example page (IC260522).
-
-> Publish format: storage only. See `references/common-patterns.md` — Storage-Only Publish Rule.
 
 ---
 
@@ -311,13 +321,16 @@ Key values (do not modify):
 ## Rules
 - NEVER build a static table for the incident list. Never emit a plain paragraph in its place (that is the v38 degradation caused by publishing via MCP html instead of REST + storage).
 - Do NOT use ADF `atlas_doc_format` JSON for this node — storage `<a>` only.
-- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it** (see `references/publish.md` — blockCard wrapper structure).
+- **ALWAYS wrap the `<a>` card with `<p local-id="…"/>` before AND after it**.
 - Always generate **3 fresh UUID v4s** per run. Never reuse local-ids from a previous run.
 - Attribute order on `<a>`: `href, data-layout, local-id, data-card-appearance, data-datasource`.
-- Storage-only publish: see `references/common-patterns.md` — Storage-Only Publish Rule.
-# Events_Tracking — "Events Tracking" section
+- Must output in Confluence Storage format.
+---
+
+## 4. Events Tracking
 
 Owns the final section of the page. Mirrors the example page (IC260522).
+**CRITICAL RULE**: The HTML for this section MUST be written to a separate file `output/section_events_tracking.html` so the orchestrator can append it at the very bottom of the page.
 
 ## Structure
 

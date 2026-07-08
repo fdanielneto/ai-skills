@@ -10,13 +10,10 @@ Usage:
   /gcn-pm help
 
 Section tokens (partial / block runs):
-  status-review      → Status Review
-  on-call-alarms     → On-Call Alarms
-  post-mortem        → Post-Mortem (last 90 days)
+  on-call            → Meeting Ops (Status Review, Alarms, Post-Mortem, Events)
   xcc-metrics        → XCC Metrics (Kamailio)
   rtpengine-metrics  → RTP Engine Metrics
   sbc-metrics        → Executive Summary + Detailed data by Region (SBC/calls)
-  events-tracking    → Events Tracking
   all                → Full page (all sections — same as omitting section tokens)
 
 Region tokens (filter for xcc-metrics / rtpengine-metrics):
@@ -32,6 +29,6 @@ Examples:
   /gcn-pm 2026-06-01 2026-06-14                           full page, all regions
   /gcn-pm 2026-06-01 2026-06-14 xcc-metrics               XCC only, all regions
   /gcn-pm 2026-06-01 2026-06-14 xcc-metrics eu-south-1    XCC, EU-South-1 only
-  /gcn-pm 2026-06-01 2026-06-14 status-review post-mortem  two sections only
+  /gcn-pm 2026-06-01 2026-06-14 on-call xcc-metrics        two sections only
   /gcn-pm help                                             show this message
 ```

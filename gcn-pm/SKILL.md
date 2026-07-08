@@ -34,20 +34,38 @@ each section to one reference file.
 > the result. Placeholders are allowed ONLY for customer PII (CALL_IDs, account
 > names, phone numbers, IPs) or when a required tool is genuinely unavailable.
 > Any `[TODO: run analysis ...]` text in the published page is a BUG.
-> See `references/common-patterns.md` — No-TODO Rule.
+> See `references/on-call.md` — No-TODO Rule.
 
 ## ACTIVATION
 
 This skill is manual. Only proceed when the user explicitly invokes it
 (`/gcn-pm ...`) or explicitly asks to build the GCN production meeting page.
 
+## ORCHESTRATION ARCHITECTURE
+
+1. **Parallel Extraction**: The orchestrator launches subagents for each requested section in parallel. 
+2. **Local Storage**: Each subagent must collect its data, generate the final Confluence Storage HTML for its section, and save it to a local temporary file (e.g., `output/section_oncall.html`, `output/section_xcc.html`, etc.).
+3. **No Direct Publishing by Extractors**: The section subagents DO NOT publish to Confluence. Their job ends when the local HTML file is written.
+4. **Publisher Assembly**: Once all section subagents complete successfully, the orchestrator launches a final **Publisher** subagent. The Publisher reads `references/publish.md`, reads the local HTML files, assembles the complete page body (Header + TOC + Sections), and performs the final REST PUT to Confluence.
+
 ## TOKEN EFFICIENCY POLICY (mandatory)
 
 1. Dispatch one subagent task per requested section token.
-2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file. Instruct the subagent to use the `read` tool on-demand to load its specific reference file and `references/common-patterns.md`.
-3. GREP DIET FOR DATASOURCES: Subagents MUST NOT use `read` on `xcc-datasources.md` or `rtpengine-datasources.md`. They must use `bash` to run `grep -B 2 -A 7 "status:" references/<file>` to load ONLY the metrics and their details into context, skipping extraneous markdown.
-4. Load `references/publish.md` only at the publish step — not before.
-5. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the `kibana-prd_execute_kb_api` queries and format the results as Native Confluence Chart XML macros.
+2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file, instructing the subagent to save its HTML output locally. Instruct the subagent to use the `read` tool on-demand to load its specific reference file.
+3. Load `references/publish.md` only for the final Publisher subagent — not before.
+4. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the Playwright fetch queries and format the results as Native Confluence Chart XML macros.
+
+
+
+## TOKEN EFFICIENCY & SCRIPT OFF-LOADING
+
+To minimize token usage and improve deterministic accuracy, this skill heavily relies on python scripts:
+
+1. **`scripts/grafana_analyzer.py`**: Executes Grafana PromQL queries, calculates P95/MAD/IQR, and determines deviations automatically based on rules defined in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. The subagent ONLY receives the summary output (e.g. "Deviations found: Alive dropped below 1").
+2. **`scripts/sbc_analyzer.py`**: Replaces `kb-proxy.js`. Filters, aggregates and computes percentages from Kibana Elasticsearch payloads. Returns pre-formatted Markdown tables, eliminating the need for the LLM to parse thousands of lines of logs.
+3. **`scripts/confluence_publisher.py`**: Assembles the Confluence Storage XML. Automatically generates UUIDs for blockCards and `<ac:image>` macros, preventing XML `StaleStateException` crashes. The LLM only needs to provide simple Markdown or raw text.
+
+DO NOT parse raw Kibana or Grafana JSONs directly in the LLM. ALWAYS route the data through these scripts.
 
 ## HELP MODE
 
@@ -109,13 +127,10 @@ Case-insensitive; `-` and `_` are interchangeable.
 
 | Canonical token      | Reference file                     | Aliases                                  |
 |----------------------|------------------------------------|------------------------------------------|
-| `status-review`      | `references/text-sections.md`      | status_review, status                    |
-| `on-call-alarms`     | `references/text-sections.md`      | on_call_alarms, on-call, oncall, alarms  |
-| `post-mortem`        | `references/text-sections.md`      | post_mortem, postmortem                  |
+| `on-call`            | `references/on-call.md`            | on_call, ops                             |
 | `xcc-metrics`        | `references/xcc-metrics.md`        | xcc_metrics, xcc, kamailio               |
 | `rtpengine-metrics`  | `references/rtpengine-metrics.md`  | rtpengine_metrics, rtpengine, rtp        |
 | `sbc-metrics`        | `references/sbc-metrics.md`        | sbc_metrics, sbc, calls                  |
-| `events-tracking`    | `references/text-sections.md`      | events_tracking, events                  |
 | `all`                | (all of the above)                 | full, page                               |
 
 Unknown token → list the valid tokens and ask.
@@ -125,32 +140,30 @@ Unknown token → list the valid tokens and ask.
 Every run — full OR block — produces a page containing ONLY the section(s) of
 THAT run. The page is wiped and rebuilt from scratch on each run.
 
-**Full run** (no section tokens): header table + TOC + all 7 sections in canonical order.
+**Full run** (no section tokens): header table + TOC + all sections in canonical order.
+Canonical order is: On-Call -> XCC Metrics -> RTP Engine Metrics -> SBC Metrics -> Events Tracking.
 
-**Block / partial run** (e.g. `/gcn-pm 2026-06-01 2026-06-02 status-review`):
+**Block / partial run** (e.g. `/gcn-pm 2026-06-01 2026-06-02 on-call`):
 header table + TOC + ONLY the requested section(s) in canonical order.
 A later block run replaces the page completely — prior sections are gone.
 
 Publish algorithm (load `references/publish.md` at this step):
-1. Build the full body for THIS run (header + TOC + this run's sections only).
-2. Locate the fixed-title page under Notes.
-3. REPLACE its ENTIRE body (or CREATE if absent) via REST + storage.
+1. Wait for all dispatched subagents to finish and write their local HTML files.
+2. Launch the Publisher subagent to read the local files and assemble the full body for THIS run.
+3. The Publisher replaces the ENTIRE body (or CREATEs if absent) of the fixed-title page via REST + storage.
 4. Header Date/Timeframe always reflect THIS run's sprint window.
 
 ## SECTION → REFERENCE MAP
 
-Read the matching reference file before authoring each section. For `text-sections.md`, read only the portion relevant to the requested section.
+Read the matching reference file before authoring each section. 
 
 | # | Page section                          | Reference file                       | Requested name    |
 |---|---------------------------------------|--------------------------------------|-------------------|
 | 0 | Header table + Table of Contents      | (this file — see STEP 0 below)       | —                 |
-| 1 | Status Review                         | `references/text-sections.md`        | Status_Review     |
-| 2 | On-Call Alarms                        | `references/text-sections.md`        | On-Call_Alarms    |
-| 3 | Post-Mortem (last 90 days)            | `references/text-sections.md`        | Post-Mortem       |
-| 4 | XCC Metrics (Kamailio)                | `references/xcc-metrics.md`          | XCC_Metrics       |
-| 5 | RTP Engine Metrics                    | `references/rtpengine-metrics.md`    | RTPEngine_Metrics |
-| 6 | Executive Summary + Detailed data     | `references/sbc-metrics.md`          | SBC_Metrics       |
-| 7 | Events Tracking                       | `references/text-sections.md`        | Events_Tracking   |
+| 1 | Meeting Ops (Status, Alarms, Post-Mortem)         | `references/on-call.md`  | On-Call           |
+| 2 | XCC Metrics (Kamailio)                | `references/xcc-metrics.md`          | XCC_Metrics       |
+| 3 | RTP Engine Metrics                    | `references/rtpengine-metrics.md`    | RTPEngine_Metrics |
+| 4 | Executive Summary + Detailed data     | `references/sbc-metrics.md`          | SBC_Metrics       |
 
 Design decisions (confirmed with requester):
 - XCC_Metrics and RTPEngine_Metrics are TWO SEPARATE sections.
@@ -206,7 +219,7 @@ See `references/publish.md` for the full canonical publish algorithm.
 - Page id: `6568476792`.
 
 Publish only via REST + `representation: "storage"`. See
-`references/common-patterns.md` — Storage-Only Publish Rule.
+`references/publish.md` — Storage-Only Publish Rule.
 
 ## FINAL OUTPUT
 
@@ -215,5 +228,3 @@ After publishing, report back:
 - 🧩 Which section(s) this run rendered — note that all other sections were cleared
 - 📊 Which metrics/regions deviated and got a chart + table this run
 - 📄 The page URL
-- ⚠️ Any section that fell back to a warning panel (never report `[TODO]` as a
-  normal outcome; if a wired data source produced no data, say why)
