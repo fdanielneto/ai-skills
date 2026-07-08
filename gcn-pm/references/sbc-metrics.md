@@ -310,8 +310,8 @@ Substitute `<SBC_NAME>`.
     "timeline": {
       "date_histogram": {
         "field": "@timestamp",
-        "calendar_interval": "1d",
-        "format": "yyyy-MM-dd"
+        "fixed_interval": "1h",
+        "format": "yyyy-MM-dd HH:mm"
       }
     }
   }
@@ -336,4 +336,3 @@ Example JSON structure expected by `plot_helper.py`:
 }
 ```
 Then output the `<ac:image>` tag referencing the uploaded PNG.
-```

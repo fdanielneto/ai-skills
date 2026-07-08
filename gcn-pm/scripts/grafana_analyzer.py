@@ -132,7 +132,7 @@ def main():
                 final_markdown += result_md
                 
     if not final_markdown.strip():
-        final_markdown = f"<p><em>No deviations found for region {region} in this run.</em></p>\n"
+        final_markdown = "No deviation detected ✅"
         
     print(final_markdown)
 
