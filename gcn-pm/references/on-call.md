@@ -203,13 +203,13 @@ async () => {
 If no rows fall in the sprint window, still proceed to capture the filtered
 (header-only) table as evidence — never fabricate rows.
 
-#### Step 3 — Screenshot
+#### Step 2 — Screenshot
 
 `browser_take_screenshot` with:
 - `filename`: `oncall-alerts-{sprint}.png`
 - do NOT use `target` (no element screenshots)
 
-#### Step 4 — Publish to Confluence
+#### Step 3 — Publish to Confluence
 
 Upload the PNG as a page attachment and embed it **directly under the plain
 link** — no caption, no label, no surrounding descriptive text:

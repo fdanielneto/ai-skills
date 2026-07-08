@@ -52,8 +52,9 @@ def analyze_metric(metric_name, config, start_epoch, end_epoch, region):
         if region:
             query = query.replace('"$region"', f'"{region}"')
             
-        # step=300 (5 minutes) for high resolution
-        res = run_grafana_mcp(query, start_epoch, end_epoch, 300)
+        # step configurable, default 300s (5 minutes) for high resolution
+        step = config.get('step', 300)
+        res = run_grafana_mcp(query, start_epoch, end_epoch, step)
         
         for series in res.get('data', {}).get('result', []):
             instance = series.get('metric', {}).get('instance', 'unknown')

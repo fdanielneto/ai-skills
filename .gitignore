@@ -1,2 +1,4 @@
 gcn-pm/output/
 gcn-pm/scripts/__pycache__/
+.playwright-mcp/
+oncall-alerts-*.png

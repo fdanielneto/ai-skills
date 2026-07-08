@@ -2,6 +2,7 @@
   grafana: https://grafana-general.svc.talkdeskapp.com/goto/cfolortpdd2psd?orgId=1
   description: "4xx, 5xx, 6xx error rate \u2014 by XCC instance"
   status: active
+  step: 300 # 5-minute granularity
   datasource: prometheus
   promql: ''
   "A \u2014 TOTAL per instance": ''
