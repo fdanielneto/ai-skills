@@ -35,6 +35,12 @@ each section to one reference file.
 > names, phone numbers, IPs) or when a required tool is genuinely unavailable.
 > Any `[TODO: run analysis ...]` text in the published page is a BUG.
 > See `references/on-call.md` — No-TODO Rule.
+>
+> This rule governs what a subagent writes into its section, not how many
+> times the orchestrator runs. A documented fallback (e.g. an info/warning
+> panel + plain link when a tool is genuinely unavailable) is a SUCCESSFUL
+> outcome, not a bug — it must be rendered once and reported, never used as
+> a reason to re-dispatch. See "Run exactly once" below.
 
 ## ACTIVATION
 
@@ -46,7 +52,21 @@ This skill is manual. Only proceed when the user explicitly invokes it
 1. **Parallel Extraction**: The orchestrator launches subagents for each requested section in parallel. 
 2. **Local Storage**: Each subagent must collect its data, generate the final Confluence Storage HTML for its section, and save it to a local temporary file (e.g., `output/section_oncall.html`, `output/section_xcc.html`, etc.).
 3. **No Direct Publishing by Extractors**: The section subagents DO NOT publish to Confluence. Their job ends when the local HTML file is written.
-4. **Publisher Assembly**: Once all section subagents complete successfully, the orchestrator launches a final **Publisher** subagent. The Publisher reads `references/publish.md`, reads the local HTML files, assembles the complete page body (Header + TOC + Sections), and performs the final REST PUT to Confluence.
+4. **Publisher Assembly**: Once all section subagents complete (successfully or with a documented fallback), the orchestrator launches a final **Publisher** subagent. The Publisher reads `references/publish.md`, reads the local HTML files, assembles the complete page body (Header + TOC + Sections), and performs the final REST PUT to Confluence via `scripts/confluence_publish.py`.
+
+### Run exactly once (mandatory — this is what prevents the infinite-loop bug)
+
+Each `/gcn-pm` invocation runs the extraction → publish pipeline **exactly
+once**. Once the Publisher subagent returns — success OR failure — the
+orchestrator writes the FINAL OUTPUT report and STOPS. Never re-dispatch
+section subagents and never re-attempt the publish within the same
+invocation, even if:
+- a data source was genuinely unavailable (render the documented fallback
+  once and move on — see the SCOPE note above),
+- the post-publish verification gate in `references/publish.md` failed
+  (report the exact failure text to the user instead of re-PUTting).
+
+If the user wants another attempt, they will invoke `/gcn-pm` again.
 
 ## TOKEN EFFICIENCY POLICY (mandatory)
 
@@ -63,7 +83,7 @@ To minimize token usage and improve deterministic accuracy, this skill heavily r
 
 1. **`scripts/grafana_analyzer.py`**: Executes Grafana PromQL queries, calculates P95/MAD/IQR, and determines deviations automatically based on rules defined in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. The subagent ONLY receives the summary output (e.g. "Deviations found: Alive dropped below 1").
 2. **`scripts/sbc_analyzer.py`**: Replaces `kb-proxy.js`. Filters, aggregates and computes percentages from Kibana Elasticsearch payloads. Returns pre-formatted Markdown tables, eliminating the need for the LLM to parse thousands of lines of logs.
-3. **`scripts/confluence_publisher.py`**: Assembles the Confluence Storage XML. Automatically generates UUIDs for blockCards and `<ac:image>` macros, preventing XML `StaleStateException` crashes. The LLM only needs to provide simple Markdown or raw text.
+3. **`scripts/confluence_publish.py`**: Publishes the assembled Confluence Storage HTML — reads current page version, PUTs the full body with `representation: "storage"`, and runs the post-publish verification gate. Called once, by the Publisher subagent only. See `references/publish.md`.
 
 DO NOT parse raw Kibana or Grafana JSONs directly in the LLM. ALWAYS route the data through these scripts.
 

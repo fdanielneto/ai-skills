@@ -36,6 +36,71 @@ def analyze_a1_a3(raw_data):
         if pct >= 0.5: # Ignora erros inferiores a 0.5% (exemplo de filtro para poupar tokens)
             print(f"| {b['key']} | {format_number(count)} ({pct:.1f}%) |")
 
+def analyze_b1(raw_data):
+    REASON_MAP = {
+        "16": "Normal call clearing",
+        "41": "Temporary failure",
+        "1": "Unallocated (unassigned) number",
+        "17": "User busy",
+        "31": "Normal, unspecified",
+        "18": "No user responding",
+        "102": "Recovery on timer expiry",
+        "20": "Subscriber absent",
+        "21": "Call rejected",
+        "19": "No answer from user (user alerted)"
+    }
+    
+    def make_table(ribbon_key, title):
+        data = raw_data.get(ribbon_key, {})
+        total = data.get('total', 0)
+        buckets = data.get('buckets', [])
+        
+        html = []
+        html.append(f'<div style="font-size: 0.85em;">')
+        html.append(f'  <table>')
+        html.append(f'    <thead>')
+        html.append(f'      <tr>')
+        html.append(f'        <th colspan="2"><strong>{title}</strong></th>')
+        html.append(f'      </tr>')
+        html.append(f'    </thead>')
+        html.append(f'    <tbody>')
+        html.append(f'      <tr>')
+        html.append(f'        <td>Total calls (STOP)</td>')
+        html.append(f'        <td>{format_number(total)}</td>')
+        html.append(f'      </tr>')
+        for b in buckets:
+            code = b['key']
+            count = b['doc_count']
+            name = REASON_MAP.get(code, f"Code {code}")
+            pct = (count / total * 100) if total > 0 else 0
+            html.append(f'      <tr>')
+            html.append(f'        <td>{name} ({code})</td>')
+            html.append(f'        <td>{format_number(count)} ({pct:.1f}%)</td>')
+            html.append(f'      </tr>')
+        html.append(f'    </tbody>')
+        html.append(f'  </table>')
+        html.append(f'</div>')
+        return '\n'.join(html)
+
+    print("<ac:layout>")
+    print("  <ac:layout-section ac:type=\"two_equal\">")
+    print("    <ac:layout-cell>")
+    print(make_table("EU", "Ribbon EU"))
+    print("    </ac:layout-cell>")
+    print("    <ac:layout-cell>")
+    print(make_table("US", "Ribbon US"))
+    print("    </ac:layout-cell>")
+    print("  </ac:layout-section>")
+    print("  <ac:layout-section ac:type=\"two_equal\">")
+    print("    <ac:layout-cell>")
+    print(make_table("APAC", "Ribbon APAC"))
+    print("    </ac:layout-cell>")
+    print("    <ac:layout-cell>")
+    print(make_table("LATAM", "Ribbon LATAM"))
+    print("    </ac:layout-cell>")
+    print("  </ac:layout-section>")
+    print("</ac:layout>")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: sbc_analyzer.py <mode> [json_file]")
@@ -51,6 +116,8 @@ def main():
         
     if mode == "a1-a3":
         analyze_a1_a3(raw_data)
+    elif mode == "b1":
+        analyze_b1(raw_data)
     else:
         print("Mode not implemented yet")
 

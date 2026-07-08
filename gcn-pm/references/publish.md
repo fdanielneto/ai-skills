@@ -63,8 +63,12 @@ X-Atlassian-Token: no-check
 ```
 with the same `$ATLASSIAN_API_TOKEN` when the Atlassian MCP upload tool is not available.
 
-The `gcn_pm_storage.py` helper (session temp directory) implements this PUT; keep
-it as the canonical implementation and always send `representation: "storage"`.
+`scripts/confluence_publish.py <sprint_start> <sprint_end> <storage_html_path>`
+implements this GET/PUT/verify sequence; it is the canonical implementation.
+Write the fully assembled storage body to a file and pass its path — always
+send `representation: "storage"`. The script reads `$ATLASSIAN_USERNAME` /
+`$ATLASSIAN_API_TOKEN` from the environment, falling back to `~/.env.secrets`
+if unset.
 
 ---
 
@@ -94,8 +98,10 @@ for tag in re.finditer(r'<ac:image[^>]*>', storage):
     assert 'ac:align="center"' in tag.group(), "FAIL: image not centered"
 ```
 
-If any assertion fails: report the specific failure, do NOT mark the run as
-successful, and either fix and re-PUT or surface the error to the user.
+Attempt the PUT exactly once. If any assertion fails: report the specific
+failure in the FINAL OUTPUT and stop — do NOT mark the run as successful, do
+NOT re-PUT, and do NOT re-run extraction. Surfacing a clear failure is the
+correct outcome of a run; silently retrying is not.
 
 ---
 
