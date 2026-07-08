@@ -183,10 +183,17 @@ RTPEngine Connection Failures:
   description: "4xx breakdown by specific code (400\u2013493) and SIP method"
   status: active
   datasource: prometheus
-  promql: '`kamailio_core_rcv_replies_4xx_{method}` for by-method, `kamailio_core_rcv_replies_{NNN}`
-    for by-code):'
-  deviation: "flag individual codes/methods whose sprint total exceeds baseline mean\
-    \ + 2\u03C3."
+  promql: ''
+  "A \u2014 BYE": sum(increase(kamailio_core_rcv_replies_4xx_bye{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "B \u2014 CANCEL": sum(increase(kamailio_core_rcv_replies_4xx_cancel{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "C \u2014 INVITE": sum(increase(kamailio_core_rcv_replies_4xx_invite{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "D \u2014 MESSAGE": sum(increase(kamailio_core_rcv_replies_4xx_message{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "E \u2014 PRACK": sum(increase(kamailio_core_rcv_replies_4xx_prack{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "F \u2014 REFER": sum(increase(kamailio_core_rcv_replies_4xx_refer{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "G \u2014 REG": sum(increase(kamailio_core_rcv_replies_4xx_reg{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "H \u2014 UPDATE": sum(increase(kamailio_core_rcv_replies_4xx_update{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  deviation: "flag individual methods whose sprint total exceeds baseline mean\
+    \ + 2\u03C3 (by-code breakdown available via the Grafana link)."
   floor: 5000 per code/method (total over sprint)
   unit: count per code/method (total over sprint)
 "Total 5xx \u2014 global":
@@ -205,8 +212,15 @@ RTPEngine Connection Failures:
     reg, update)
   status: active
   datasource: prometheus
-  promql: '`kamailio_core_rcv_replies_5xx_{method}`):'
-  (same pattern for: cancel, message, prack, refer, reg, update)
+  promql: ''
+  "A — BYE": sum(increase(kamailio_core_rcv_replies_5xx_bye{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "B — CANCEL": sum(increase(kamailio_core_rcv_replies_5xx_cancel{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "C — INVITE": sum(increase(kamailio_core_rcv_replies_5xx_invite{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "D — MESSAGE": sum(increase(kamailio_core_rcv_replies_5xx_message{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "E — PRACK": sum(increase(kamailio_core_rcv_replies_5xx_prack{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "F — REFER": sum(increase(kamailio_core_rcv_replies_5xx_refer{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "G — REG": sum(increase(kamailio_core_rcv_replies_5xx_reg{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "H — UPDATE": sum(increase(kamailio_core_rcv_replies_5xx_update{region="$region",role="edgerouter",service=~".*"}[$__range]))
   deviation: "flag methods whose sprint total exceeds baseline mean + 2\u03C3."
   floor: 500 per method (total over sprint)
   unit: count per method (total over sprint)
@@ -225,8 +239,15 @@ RTPEngine Connection Failures:
   description: 6xx breakdown by SIP method
   status: active
   datasource: prometheus
-  promql: '`kamailio_core_rcv_replies_6xx_{method}`):'
-  (same pattern for: bye, cancel, message, prack, refer, reg, update)
+  promql: ''
+  "A — BYE": sum(increase(kamailio_core_rcv_replies_6xx_bye{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "B — CANCEL": sum(increase(kamailio_core_rcv_replies_6xx_cancel{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "C — INVITE": sum(increase(kamailio_core_rcv_replies_6xx_invite{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "D — MESSAGE": sum(increase(kamailio_core_rcv_replies_6xx_message{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "E — PRACK": sum(increase(kamailio_core_rcv_replies_6xx_prack{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "F — REFER": sum(increase(kamailio_core_rcv_replies_6xx_refer{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "G — REG": sum(increase(kamailio_core_rcv_replies_6xx_reg{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "H — UPDATE": sum(increase(kamailio_core_rcv_replies_6xx_update{region="$region",role="edgerouter",service=~".*"}[$__range]))
   deviation: "flag methods whose sprint total exceeds baseline mean + 2\u03C3."
   floor: 50 per method (total over sprint)
   unit: count per method (total over sprint)
@@ -247,11 +268,21 @@ Requests by Method:
     MESSAGE, NOTIFY, OPTIONS, PRACK, PUBLISH, REFER, REGISTER, SUBSCRIBE, UPDATE)
   status: active
   datasource: prometheus
-  promql: '`kamailio_core_rcv_requests_{method}`):'
-  INVITE: sum(increase(kamailio_core_rcv_requests_invite{region="$region",role="edgerouter",service=~".*"}[$__range]))
-  BYE: sum(increase(kamailio_core_rcv_requests_bye{region="$region",role="edgerouter",service=~".*"}[$__range]))
-  (same pattern for: ack, cancel, info, message, notify, options, prack, publish,
-    refer, register, subscribe, update)
+  promql: ''
+  "A — ACK": sum(increase(kamailio_core_rcv_requests_ack{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "B — BYE": sum(increase(kamailio_core_rcv_requests_bye{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "C — CANCEL": sum(increase(kamailio_core_rcv_requests_cancel{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "D — INFO": sum(increase(kamailio_core_rcv_requests_info{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "E — INVITE": sum(increase(kamailio_core_rcv_requests_invite{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "F — MESSAGE": sum(increase(kamailio_core_rcv_requests_message{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "G — NOTIFY": sum(increase(kamailio_core_rcv_requests_notify{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "H — OPTIONS": sum(increase(kamailio_core_rcv_requests_options{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "I — PRACK": sum(increase(kamailio_core_rcv_requests_prack{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "J — PUBLISH": sum(increase(kamailio_core_rcv_requests_publish{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "K — REFER": sum(increase(kamailio_core_rcv_requests_refer{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "L — REGISTER": sum(increase(kamailio_core_rcv_requests_register{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "M — SUBSCRIBE": sum(increase(kamailio_core_rcv_requests_subscribe{region="$region",role="edgerouter",service=~".*"}[$__range]))
+  "N — UPDATE": sum(increase(kamailio_core_rcv_requests_update{region="$region",role="edgerouter",service=~".*"}[$__range]))
   deviation: "per-method baseline median \xB1 2\xD7IQR"
   floor: 500000 per method (total over sprint)
   unit: count per method (total over sprint)
@@ -355,20 +386,17 @@ MOS Metrics Over Time:
     > 0)
   "B \u2014 MOS avg jitter": quantile(0.5, kamailio_mos_avg_jitter{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"}
     > 0)
-  "C \u2014 MOS avg packetloss": quantile(0.5, kamailio_mos_avg_packetloss{...} >
-    0)
-  "D \u2014 MOS avg RTT": quantile(0.5, kamailio_mos_avg_rtt{...} > 0)
-  "E \u2014 MOS avg samples": quantile(0.5, kamailio_mos_avg_samples{...} > 0)
-  "F \u2014 MOS max": quantile(0.5, kamailio_mos_max{...} > 0)
-  "G \u2014 MOS max jitter": quantile(0.5, kamailio_mos_max_jitter{...} > 0)
-  "H \u2014 MOS max packetloss": quantile(0.5, kamailio_mos_max_packetloss{...} >
-    0)
-  "I \u2014 MOS max RTT": quantile(0.5, kamailio_mos_max_rtt{...} > 0)
-  "J \u2014 MOS min": quantile(0.5, kamailio_mos_min{...} > 0)
-  "K \u2014 MOS min jitter": quantile(0.5, kamailio_mos_min_jitter{...} > 0)
-  "L \u2014 MOS min packetloss": quantile(0.5, kamailio_mos_min_packetloss{...} >
-    0)
-  "M \u2014 MOS min RTT": quantile(0.5, kamailio_mos_min_rtt{...} > 0)
+  "C \u2014 MOS avg packetloss": quantile(0.5, kamailio_mos_avg_packetloss{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "D \u2014 MOS avg RTT": quantile(0.5, kamailio_mos_avg_rtt{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "E \u2014 MOS avg samples": quantile(0.5, kamailio_mos_avg_samples{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "F \u2014 MOS max": quantile(0.5, kamailio_mos_max{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "G \u2014 MOS max jitter": quantile(0.5, kamailio_mos_max_jitter{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "H \u2014 MOS max packetloss": quantile(0.5, kamailio_mos_max_packetloss{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "I \u2014 MOS max RTT": quantile(0.5, kamailio_mos_max_rtt{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "J \u2014 MOS min": quantile(0.5, kamailio_mos_min{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "K \u2014 MOS min jitter": quantile(0.5, kamailio_mos_min_jitter{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "L \u2014 MOS min packetloss": quantile(0.5, kamailio_mos_min_packetloss{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
+  "M \u2014 MOS min RTT": quantile(0.5, kamailio_mos_min_rtt{region="$region",role="edgerouter",service=~".*",account_id=~".*",xheader=~".*"} > 0)
   deviation: flag when fleet p50 MOS avg drops below 3.5 or decreases > 0.3 vs. baseline
   floor: < 3.0
   unit: "MOS (1\u20135 scale)"

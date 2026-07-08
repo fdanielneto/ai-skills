@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 import sys
 import yaml
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 from grafana_mcp_client import GrafanaMcpClient
+
+# Sub-query keys look like "A — User", "B — 4xx only" (single letter, space, dash).
+SUBQUERY_KEY = re.compile(r'^[A-Z] [—\-]')
 
 def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, datasource_uid="prometheus"):
     """
@@ -22,6 +26,11 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
     step = 300  # 5-minute resolution
     start_s = start_epoch_ms // 1000
     end_s = end_epoch_ms // 1000
+
+    # Grafana dashboard macro: not valid raw PromQL. Substitute the actual sprint
+    # window duration so `increase(metric[$__range])` etc. become valid.
+    if "$__range" in promql:
+        promql = promql.replace("$__range", f"{end_s - start_s}s")
 
     try:
         return client.query_prometheus(
@@ -82,6 +91,57 @@ def detect_deviation_spike(values):
     threshold = median + (3 * mad)
     return peak_val > threshold, peak_val
 
+def detect_deviation_state(values):
+    """State metrics: flag a jump above median + 2*IQR, or sustained zeros (>50%)."""
+    if not values:
+        return False, 0
+    peak_val = max(values)
+    q1, q3, iqr = calculate_iqr(values)
+    median = sorted(values)[len(values) // 2]
+    if iqr > 0 and peak_val > median + (2 * iqr):
+        return True, peak_val
+    if sum(1 for v in values if v == 0) > len(values) * 0.5:
+        return True, 0
+    return False, peak_val
+
+def detect_deviation(deviation_rule, values):
+    """Dispatch on the metric's declared deviation type.
+
+    Free-text/baseline rules (no RESOURCE/RATE/STATE keyword) are not
+    auto-detected — they need a historical baseline we don't have here — so
+    they never false-flag; their data is still fetched and their Grafana link
+    published.
+    """
+    if not values:
+        return False, 0
+    if 'RESOURCE' in deviation_rule:
+        return detect_deviation_resource(None, values)
+    if 'RATE' in deviation_rule or 'Spike' in deviation_rule:
+        return detect_deviation_spike(values)
+    if 'STATE' in deviation_rule:
+        return detect_deviation_state(values)
+    return False, max(values)
+
+def series_label(metric):
+    """Human label for a series: prefer instance, then a name-ish label."""
+    for key in ('instance', 'name', 'metric', 'xheader', '__name__'):
+        if metric.get(key):
+            return metric[key]
+    return 'aggregated'
+
+def series_points(series):
+    """Return [(ts, value), ...] for either a range (values) or instant (value) series."""
+    raw = series.get('values')
+    if raw is None and series.get('value'):
+        raw = [series['value']]
+    points = []
+    for ts, val in (raw or []):
+        try:
+            points.append((float(ts), float(val)))
+        except (ValueError, TypeError):
+            continue
+    return points
+
 def format_timestamp(epoch_s):
     """Convert a Prometheus timestamp (Unix epoch seconds) to ISO format."""
     return datetime.fromtimestamp(float(epoch_s), tz=timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
@@ -91,69 +151,60 @@ def build_grafana_url(base_url, region, start_ms, end_ms):
     return f"{base_url}&var-region={region}&from={start_ms}&to={end_ms}"
 
 def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, region):
-    """Analyze a single metric and return HTML output if deviated."""
+    """Analyze one metric and return HTML for its deviated series (or None).
 
-    # Extract promql: either direct 'promql' field or from sub-fields (A, B, C, etc.)
-    promql = config.get('promql', '')
-    sub_queries = {}
-    for key, val in config.items():
-        if key.startswith(('A ', 'B ', 'C ', 'D ', 'E ')) and isinstance(val, str) and val:
-            sub_queries[key] = val
-
-    if not promql and not sub_queries:
-        return None
-
-    # Fetch data
-    all_deviated = []
-
-    if promql:
-        res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
-        data = res.get('data', {}).get('result', [])
-
-        for series in data:
-            instance = series.get('metric', {}).get('instance', 'aggregated')
-            values = [float(v[1]) for v in series.get('values', []) if v[1]]
-            if not values:
-                continue
-
-            peak_val = max(values)
-            peak_time_idx = values.index(peak_val)
-            peak_timestamp = series.get('values', [[0, 0]])[peak_time_idx][0] if series.get('values') else 0
-
-            # Check deviation based on metric type
-            deviated = False
-            if 'RESOURCE' in config.get('deviation', ''):
-                deviated, _ = detect_deviation_resource(metric_name, values)
-            elif 'RATE' in config.get('deviation', '') or 'Spike' in config.get('deviation', ''):
-                deviated, _ = detect_deviation_spike(values)
-
-            if deviated:
-                all_deviated.append({
-                    "instance": instance,
-                    "peak": peak_val,
-                    "timestamp": peak_timestamp,
-                    "label": "main"
-                })
-
-    # If no deviation found, return None
-    if not all_deviated:
-        return None
-
-    # Build output HTML for this metric
+    Runs BOTH the direct `promql` field and every A/B/C… sub-query, each under
+    the metric's deviation rule. Sub-query results are labelled by their key so
+    the reader sees which dimension (e.g. "A — 4xx only") deviated.
+    """
+    deviation_rule = config.get('deviation', '')
     unit = config.get('unit', '')
-    grafana_url = config.get('grafana', '')
-    grafana_link = build_grafana_url(grafana_url, region, start_epoch_ms, end_epoch_ms) if grafana_url else grafana_url
+
+    # Build the list of (sub-label, promql) to run.
+    queries = []
+    main = config.get('promql', '')
+    if isinstance(main, str) and main.strip():
+        queries.append((None, main))
+    for key, val in config.items():
+        if isinstance(key, str) and SUBQUERY_KEY.match(key) and isinstance(val, str) and val.strip():
+            queries.append((key, val))
+
+    if not queries:
+        return None
+
+    groups = []  # (sub_label, [ {instance, peak, timestamp} ])
+    for sub_label, promql in queries:
+        res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
+        deviated = []
+        for series in res.get('data', {}).get('result', []):
+            points = series_points(series)
+            if not points:
+                continue
+            values = [v for _, v in points]
+            peak_ts, peak_val = max(points, key=lambda p: p[1])
+            flagged, _ = detect_deviation(deviation_rule, values)
+            if flagged:
+                deviated.append({
+                    "instance": series_label(series.get('metric', {})),
+                    "peak": peak_val,
+                    "timestamp": peak_ts,
+                })
+        if deviated:
+            groups.append((sub_label, deviated))
+
+    if not groups:
+        return None
 
     html_output = ""
-    html_output += f"<p><strong>{metric_name} deviation detected</strong></p>\n"
-    html_output += f"<p>Reference = {all_deviated[0]['peak']:.2f} {unit}</p>\n"
-    html_output += "<ul>\n"
-
-    for dev in all_deviated:
-        timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
-        html_output += f"  <li>{dev['instance']}: peak {dev['peak']:.2f} {unit} at {timestamp_str}</li>\n"
-
-    html_output += "</ul>\n"
+    for sub_label, deviated in groups:
+        title = metric_name if not sub_label else f"{metric_name} — {sub_label}"
+        html_output += f"<p><strong>{title} deviation detected</strong></p>\n"
+        html_output += f"<p>Reference = {deviated[0]['peak']:.2f} {unit}</p>\n"
+        html_output += "<ul>\n"
+        for dev in deviated:
+            timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
+            html_output += f"  <li>{dev['instance']}: peak {dev['peak']:.2f} {unit} at {timestamp_str}</li>\n"
+        html_output += "</ul>\n"
 
     return html_output
 
@@ -188,11 +239,17 @@ def main():
     finally:
         client.close()
 
-    # Build final region block
-    grafana_base = "https://grafana-general.svc.talkdeskapp.com/goto/dfolpmd59gp34d?orgId=1"
+    # Build final region block. Section + base link derive from the config
+    # (was hardcoded to RTPEngine, which mislabelled XCC runs).
+    section = "RTPEngine" if "rtp" in os.path.basename(config_file).lower() else "XCC"
+    grafana_base = next(
+        (cfg.get('grafana') for cfg in config.values()
+         if isinstance(cfg, dict) and cfg.get('status') == 'active' and cfg.get('grafana')),
+        "https://grafana-general.svc.talkdeskapp.com",
+    )
     grafana_link = build_grafana_url(grafana_base, region, start_epoch_ms, end_epoch_ms) if region else grafana_base
 
-    final_html = f'<p><a href="{grafana_link}">Grafana — RTPEngine {region}</a></p>\n'
+    final_html = f'<p><a href="{grafana_link}">Grafana — {section} {region}</a></p>\n'
 
     if has_deviation:
         final_html += all_html
