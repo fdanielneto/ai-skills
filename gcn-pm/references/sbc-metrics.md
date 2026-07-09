@@ -148,9 +148,10 @@ For **each of the 8 individual SBCs**, an expandable dropdown (sub-region name a
 **CRITICAL**: You MUST run the query and generate the chart for EACH INDIVIDUAL SBC separately (8 total). The 'EU-South-1' dropdown should ONLY contain the chart for `PRDEUS1RSBC`. DO NOT group by Ribbon for this step.
 
 Inside each dropdown:
-1.  Use `bash` to execute `sbc_analyzer.py` with the correct SBC name.
-2.  The script will generate the PNG locally.
-3.  Embed the generated PNG using `<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="..."/></ac:image>`.
+1.  Run the B-2 ES query (see § B-2 below), then pipe the response into
+    `python3 scripts/sbc_analyzer.py b2 <SBC_NAME>` (e.g. `PRDEUS1RSBC`).
+2.  The script generates the PNG locally and prints the ready `<ac:image>` tag.
+3.  Paste that tag directly — do not build the image tag by hand.
 
 ---
 
@@ -212,37 +213,22 @@ Execute the following Elasticsearch JSON query (substitute `<START_SPRINT_DATE>`
 }
 ```
 
-**Extraction Logic:**
-1. `TOTAL_CALL_ATTEMPTS` = `hits.total.value`
-2. `TOTAL_MEDIA_ANCHORING_CALLS` = `aggregations.media_anchoring.doc_count`
-3. Disconnect Top 10 = `aggregations.disconnect_reasons.buckets`
-
 **Return format:**
-Return two distinct blocks.
-First, a Markdown table for A-1:
-```markdown
-| Metric                              | Value                          |
-|-------------------------------------|--------------------------------|
-| Total Call Attempts (all)           | <TOTAL_CALL_ATTEMPTS>          |
-| Total Media Anchoring Calls (all)   | <TOTAL_MEDIA_ANCHORING_CALLS>  |
-```
-
-Second, a Markdown table for A-3:
-```markdown
-| Metric | Value |
-|--------|-------|
-| Total calls (STOP) | <TOTAL_CALL_ATTEMPTS> |
-| <Reason 1> | <count> (<pct>%) |
-| <Reason 2> | <count> (<pct>%) |
-```
-*(pct = count / TOTAL_CALL_ATTEMPTS * 100, one decimal place)*
+Pipe the raw ES response into `python3 scripts/sbc_analyzer.py a1-a3`; paste
+its stdout verbatim (it prints the A-1 table then the A-3 table, in order —
+do NOT hand-compute counts or percentages). Note: A-3's "Top 10" may render
+fewer than 10 rows — `sbc_analyzer.py` silently drops disconnect-reason
+buckets under 0.5% of total (a deliberate token-saving filter); that's
+expected, not a regression.
 
 ---
 
 
-## B-1. Disconnect Codes by Ribbon (run once per Ribbon)
+## B-1. Disconnect Codes by Ribbon (single combined query, all 4 Ribbons)
 
-Substitute `<SBC_A>`, `<SBC_B>` based on the Ribbon mapping.
+One query returns all four Ribbons at once via a `filters` aggregation (each
+named filter matches that Ribbon's 2 SBCs from the Region → SBC Map above) —
+avoids 4 separate round-trips.
 
 ```json
 {
@@ -250,15 +236,7 @@ Substitute `<SBC_A>`, `<SBC_B>` based on the Ribbon mapping.
   "query": {
     "bool": {
       "must": [
-        { "range": { "@timestamp": { "gte": "<START_SPRINT_DATE>T00:00:00.000Z", "lte": "<END_SPRINT_DATE>T23:59:59.000Z" } } },
-        {
-          "bool": {
-            "should": [
-              { "match_phrase": { "Gateway Name.keyword": "<SBC_A>" } },
-              { "match_phrase": { "Gateway Name.keyword": "<SBC_B>" } }
-            ]
-          }
-        }
+        { "range": { "@timestamp": { "gte": "<START_SPRINT_DATE>T00:00:00.000Z", "lte": "<END_SPRINT_DATE>T23:59:59.000Z" } } }
       ],
       "must_not": [
         { "match_phrase": { "Record Type.keyword": "START" } }
@@ -266,25 +244,42 @@ Substitute `<SBC_A>`, `<SBC_B>` based on the Ribbon mapping.
     }
   },
   "aggs": {
-    "reasons": {
-      "terms": { "field": "Call Disconnect Reason.keyword", "size": 5 }
+    "ribbons": {
+      "filters": {
+        "filters": {
+          "EU": { "bool": { "should": [
+            { "match_phrase": { "Gateway Name.keyword": "PRDEUS1RSBC" } },
+            { "match_phrase": { "Gateway Name.keyword": "PRDEUW3RSBC" } }
+          ] } },
+          "US": { "bool": { "should": [
+            { "match_phrase": { "Gateway Name.keyword": "prduse1rsbc" } },
+            { "match_phrase": { "Gateway Name.keyword": "prdusw2rsbc" } }
+          ] } },
+          "APAC": { "bool": { "should": [
+            { "match_phrase": { "Gateway Name.keyword": "PRDAPS1RSBC" } },
+            { "match_phrase": { "Gateway Name.keyword": "PRDAPS2RSBC" } }
+          ] } },
+          "LATAM": { "bool": { "should": [
+            { "match_phrase": { "Gateway Name.keyword": "PRDSAE1RSBC1" } },
+            { "match_phrase": { "Gateway Name.keyword": "PRDSAE1RSBC2" } }
+          ] } }
+        }
+      },
+      "aggs": {
+        "reasons": {
+          "terms": { "field": "Call Disconnect Reason.keyword", "size": 5 }
+        }
+      }
     }
   }
 }
 ```
 
-**Extraction Logic:**
-1. Total calls for Ribbon = `hits.total.value`
-2. Top 5 Reasons = `aggregations.reasons.buckets`
-
 **Return format:**
-A Markdown table:
-```markdown
-| Metric | Value |
-|--------|-------|
-| Total calls (STOP) | <Ribbon_Total_Calls> |
-| <Reason 1> | <count> (<pct>%) |
-```
+Pipe the combined ES response into `python3 scripts/sbc_analyzer.py b1`;
+paste its stdout verbatim — it already prints the complete `<ac:layout>`
+with all four mini-tables in the 2+2 layout described above. Do not
+hand-compute totals or percentages.
 
 ---
 
@@ -319,20 +314,7 @@ Substitute `<SBC_NAME>`.
 ```
 
 **Return format:**
-`sbc_analyzer.py` will return a JSON array of buckets.
-You must use a Python script to call `scripts/plot_helper.py` to generate a PNG.
-Example JSON structure expected by `plot_helper.py`:
-```json
-{
-  "lines": [
-    {
-      "label": "<SBC_NAME>",
-      "points": [
-        {"x": "2026-06-15", "y": 123},
-        {"x": "2026-06-16", "y": 456}
-      ]
-    }
-  ]
-}
-```
-Then output the `<ac:image>` tag referencing the uploaded PNG.
+Pipe the raw ES response into `python3 scripts/sbc_analyzer.py b2 <SBC_NAME>`;
+it generates `output/sbc_timeline_<SBC_NAME>.png` and prints the ready
+`<ac:image>` tag on stdout — paste that directly, do not build the chart JSON
+or call `plot_helper.py` yourself.

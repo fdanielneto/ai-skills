@@ -73,7 +73,7 @@ If the user wants another attempt, they will invoke `/gcn-pm` again.
 1. Dispatch one subagent task per requested section token.
 2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file, instructing the subagent to save its HTML output locally. Instruct the subagent to use the `read` tool on-demand to load its specific reference file.
 3. Load `references/publish.md` only for the final Publisher subagent — not before.
-4. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the Playwright fetch queries and format the results as Native Confluence Chart XML macros.
+4. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents to execute the Playwright fetch queries and format the results as PNG charts via `scripts/plot_helper.py` + `<ac:image>` tags (see `references/metric-analysis-engine.md` — Native Confluence Chart macros are never used, they cause `StaleStateException` crashes).
 
 
 

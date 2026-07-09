@@ -84,19 +84,12 @@ if unset.
 
 ## Post-publish verification gate (MANDATORY — every run)
 
-After the PUT, immediately GET the page storage and assert:
+After the PUT, immediately GET the page storage and assert.
 
-```python
-# Pseudo-code — run after every PUT
-storage = GET /rest/api/content/6568476792?expand=body.storage
-if 'data-datasource' in storage:
-    for m in re.finditer(r'data-datasource', storage):
-        astart = storage.rfind('<a ', 0, m.start())
-        pre    = storage[max(0, astart-50):astart]
-        assert '<p local-id=' in pre, "FAIL: missing <p local-id/> before card"
-for tag in re.finditer(r'<ac:image[^>]*>', storage):
-    assert 'ac:align="center"' in tag.group(), "FAIL: image not centered"
-```
+This check runs inside `confluence_publish.py`'s `verify()` (lines 66–74) —
+on failure the script calls `sys.exit()` with the specific assertion message
+and exits non-zero; report that message verbatim in FINAL OUTPUT, do not
+re-PUT.
 
 Attempt the PUT exactly once. If any assertion fails: report the specific
 failure in the FINAL OUTPUT and stop — do NOT mark the run as successful, do

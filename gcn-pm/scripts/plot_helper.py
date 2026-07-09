@@ -33,7 +33,7 @@ def main():
                 x_val = x_str # fallback to string
             x_vals.append(x_val)
             y_vals.append(pt['y'])
-        plt.plot(x_vals, y_vals, marker='.', linestyle='-', label=line.get('label'))
+        plt.plot(x_vals, y_vals, linestyle='-', label=line.get('label'))
 
     threshold = data.get('threshold')
     if threshold:
@@ -51,7 +51,7 @@ def main():
         
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    plt.savefig(output_path, dpi=100)
+    plt.savefig(output_path, dpi=150)
     plt.close()
 
 if __name__ == "__main__":

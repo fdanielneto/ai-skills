@@ -50,10 +50,12 @@ def analyze_b1(raw_data):
         "19": "No answer from user (user alerted)"
     }
     
+    ribbon_buckets = raw_data.get('aggregations', {}).get('ribbons', {}).get('buckets', {})
+
     def make_table(ribbon_key, title):
-        data = raw_data.get(ribbon_key, {})
-        total = data.get('total', 0)
-        buckets = data.get('buckets', [])
+        data = ribbon_buckets.get(ribbon_key, {})
+        total = data.get('doc_count', 0)
+        buckets = data.get('reasons', {}).get('buckets', [])
         
         html = []
         html.append(f'<div style="font-size: 0.85em;">')
@@ -101,19 +103,54 @@ def analyze_b1(raw_data):
     print("  </ac:layout-section>")
     print("</ac:layout>")
 
+def analyze_b2(raw_data, sbc_name):
+    """Per-SBC call attempts timeline -> PNG + ready-to-embed <ac:image> tag."""
+    buckets = raw_data.get('aggregations', {}).get('timeline', {}).get('buckets', [])
+    payload = {
+        "lines": [{
+            "label": sbc_name,
+            "points": [{"x": b.get('key_as_string', ''), "y": b.get('doc_count', 0)} for b in buckets],
+        }]
+    }
+
+    os.makedirs("output", exist_ok=True)
+    out_path = f"output/sbc_timeline_{sbc_name}.png"
+    plot_helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plot_helper.py")
+    try:
+        subprocess.run(
+            [sys.executable, plot_helper, f"Call Attempts — {sbc_name}", out_path, "Time", "calls", json.dumps(payload)],
+            check=True, capture_output=True, text=True,
+        )
+    except Exception as e:
+        sys.exit(f"ERROR: chart generation failed for {sbc_name}: {e}")
+
+    print(f'<ac:image ac:align="center" ac:width="950"><ri:attachment ri:filename="{os.path.basename(out_path)}"/></ac:image>')
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: sbc_analyzer.py <mode> [json_file]")
         sys.exit(1)
-        
+
     mode = sys.argv[1]
-    
+
+    if mode == "b2":
+        if len(sys.argv) < 3:
+            sys.exit("Usage: sbc_analyzer.py b2 <SBC_NAME> [json_file]")
+        sbc_name = sys.argv[2]
+        if len(sys.argv) > 3:
+            with open(sys.argv[3], 'r') as f:
+                raw_data = json.load(f)
+        else:
+            raw_data = json.load(sys.stdin)
+        analyze_b2(raw_data, sbc_name)
+        return
+
     if len(sys.argv) > 2:
         with open(sys.argv[2], 'r') as f:
             raw_data = json.load(f)
     else:
         raw_data = json.load(sys.stdin)
-        
+
     if mode == "a1-a3":
         analyze_a1_a3(raw_data)
     elif mode == "b1":

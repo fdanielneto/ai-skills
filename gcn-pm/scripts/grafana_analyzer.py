@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 import yaml
 from datetime import datetime, timezone
@@ -122,6 +123,20 @@ def detect_deviation(deviation_rule, values):
         return detect_deviation_state(values)
     return False, max(values)
 
+def check_floor(floor_value, floor_op, values):
+    """Floor bypass: flag immediately if any point crosses the metric's hard
+    floor, without waiting for the statistical rule. `floor_op` picks the
+    relevant extreme: gte/gt metrics are bad when a value is too HIGH (check
+    max), lt metrics (e.g. MOS) are bad when a value is too LOW (check min).
+    """
+    if floor_value is None or not values:
+        return False
+    if floor_op == 'lt':
+        return min(values) < floor_value
+    if floor_op == 'gt':
+        return max(values) > floor_value
+    return max(values) >= floor_value  # gte (default)
+
 def series_label(metric):
     """Human label for a series: prefer instance, then a name-ish label."""
     for key in ('instance', 'name', 'metric', 'xheader', '__name__'):
@@ -150,6 +165,39 @@ def build_grafana_url(base_url, region, start_ms, end_ms):
     """Build parameterized Grafana URL."""
     return f"{base_url}&var-region={region}&from={start_ms}&to={end_ms}"
 
+def slugify(text):
+    """lowercase, non-alphanumeric -> underscore (matches existing chart_<region>_<slug>.png convention)."""
+    return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+
+def format_points(points):
+    """[(epoch_s, val), ...] -> plot_helper.py's expected [{"x": "YYYY-MM-DD HH:MM", "y": val}, ...].
+
+    plot_helper.py's parser only accepts a bare date or '%Y-%m-%d %H:%M' (space,
+    not ISO 'T'/'Z') — feeding it anything else silently falls back to a string
+    x-axis.
+    """
+    return [
+        {"x": datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d %H:%M'), "y": val}
+        for ts, val in points
+    ]
+
+def slice_zoom(points, center_ts, window_s=1800):
+    """Points within center_ts +/- window_s (default 30 min)."""
+    return [(ts, v) for ts, v in points if center_ts - window_s <= ts <= center_ts + window_s]
+
+def generate_chart(title, out_path, unit, payload):
+    """Shell out to plot_helper.py. Never raises: a broken chart must not fail the metric."""
+    plot_helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plot_helper.py")
+    try:
+        subprocess.run(
+            [sys.executable, plot_helper, title, out_path, "Time", unit, json.dumps(payload)],
+            check=True, capture_output=True, text=True,
+        )
+        return True
+    except Exception as e:
+        print(f"WARN: chart generation failed for '{title}': {e}", file=sys.stderr)
+        return False
+
 def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, region):
     """Analyze one metric and return HTML for its deviated series (or None).
 
@@ -159,6 +207,9 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
     """
     deviation_rule = config.get('deviation', '')
     unit = config.get('unit', '')
+    floor_value = config.get('floor_value')
+    floor_op = config.get('floor_op', 'gte')
+    is_state = 'STATE' in deviation_rule
 
     # Build the list of (sub-label, promql) to run.
     queries = []
@@ -172,7 +223,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
     if not queries:
         return None
 
-    groups = []  # (sub_label, [ {instance, peak, timestamp} ])
+    groups = []  # (sub_label, [ {instance, peak, timestamp, points} ])
     for sub_label, promql in queries:
         res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
         deviated = []
@@ -182,12 +233,14 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
                 continue
             values = [v for _, v in points]
             peak_ts, peak_val = max(points, key=lambda p: p[1])
-            flagged, _ = detect_deviation(deviation_rule, values)
+            # Floor bypass short-circuits the statistical rule (metric-analysis-engine.md §1).
+            flagged = check_floor(floor_value, floor_op, values) or detect_deviation(deviation_rule, values)[0]
             if flagged:
                 deviated.append({
                     "instance": series_label(series.get('metric', {})),
                     "peak": peak_val,
                     "timestamp": peak_ts,
+                    "points": points,
                 })
         if deviated:
             groups.append((sub_label, deviated))
@@ -195,16 +248,54 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
     if not groups:
         return None
 
+    metric_slug = slugify(metric_name)
+
     html_output = ""
     for sub_label, deviated in groups:
         title = metric_name if not sub_label else f"{metric_name} — {sub_label}"
+        reference = deviated[0]['peak']
         html_output += f"<p><strong>{title} deviation detected</strong></p>\n"
-        html_output += f"<p>Reference = {deviated[0]['peak']:.2f} {unit}</p>\n"
+        html_output += f"<p>Reference = {reference:.2f} {unit}</p>\n"
         html_output += "<ul>\n"
         for dev in deviated:
             timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
             html_output += f"  <li>{dev['instance']}: peak {dev['peak']:.2f} {unit} at {timestamp_str}</li>\n"
         html_output += "</ul>\n"
+
+        # STATE metrics never get a chart (blanket-skip; matches rtpengine-metrics.md's
+        # existing rule, resolves xcc-metrics.md's line 198 vs 240 contradiction).
+        if is_state:
+            continue
+
+        group_slug = metric_slug if not sub_label else f"{metric_slug}_{slugify(sub_label)}"
+        region_tag = region or "all"
+
+        overview_payload = {
+            "lines": [{"label": dev["instance"], "points": format_points(dev["points"])} for dev in deviated],
+            "threshold": {"label": "Reference", "value": reference},
+        }
+        overview_path = f"output/chart_{region_tag}_{group_slug}.png"
+        if generate_chart(title, overview_path, unit, overview_payload):
+            html_output += (
+                f'<ac:image ac:align="center" ac:width="950">'
+                f'<ri:attachment ri:filename="{os.path.basename(overview_path)}"/></ac:image>\n'
+            )
+
+            # Zoom chart: peak +/- 30 min around the primary (first) deviated series' event.
+            center_ts = deviated[0]['timestamp']
+            zoom_lines = []
+            for dev in deviated:
+                zoomed = slice_zoom(dev['points'], center_ts)
+                if len(zoomed) >= 3:
+                    zoom_lines.append({"label": dev["instance"], "points": format_points(zoomed)})
+            if zoom_lines:
+                zoom_payload = {"lines": zoom_lines, "threshold": {"label": "Reference", "value": reference}}
+                zoom_path = f"output/chart_{region_tag}_{group_slug}_zoom.png"
+                if generate_chart(f"{title} (zoom)", zoom_path, unit, zoom_payload):
+                    html_output += (
+                        f'<ac:image ac:align="center" ac:width="950">'
+                        f'<ri:attachment ri:filename="{os.path.basename(zoom_path)}"/></ac:image>\n'
+                    )
 
     return html_output
 

@@ -17,21 +17,43 @@ For every active metric defined in `config/xcc_metrics.yaml` and `config/rtp_met
 
 ### Deviation Rules Applied by the Script
 
-Each metric defines a **floor** (an absolute hard trigger value) and a fallback statistical rule.
+Each metric may define a **floor** (an absolute hard trigger value, via the
+`floor_value`/`floor_op` YAML fields) and a fallback statistical rule.
 
-1. **Floor bypass** (checked first):  
-   If any data point meets or exceeds the metric's floor, the metric is **flagged as deviating immediately**.
-2. **Fallback statistical rule**:  
-   If the floor was not breached, the script applies the metric's statistical deviation rule across the entire array.
+1. **Floor bypass** (checked first):
+   If any data point crosses the metric's floor (`floor_op: gte|gt` — value
+   too HIGH; `floor_op: lt` — value too LOW, e.g. MOS), the metric is
+   **flagged as deviating immediately**, without waiting for the statistical
+   rule. Currently wired up in `config/xcc_metrics.yaml` only — see that
+   file for which metrics have a numeric floor and which are left
+   statistical-only (formula/cross-series floors like "CPU count × 1.2"
+   aren't parsed automatically). `config/rtp_metrics.yaml` has no floor
+   values defined yet.
+2. **Fallback statistical rule**:
+   If the floor was not breached (or the metric has no floor), the script
+   applies the metric's statistical deviation rule across the entire array,
+   dispatched by keyword in the `deviation:` field:
    - **RATE / Spikes**: Median + 3×MAD (Median Absolute Deviation)
    - **RESOURCE / Stable**: 95th Percentile (P95) against a baseline threshold
-   - **STATE / Gaps**: Detection of sustained 0s or gaps lasting > 5 minutes
+   - **STATE / Gaps**: sustained-zero or IQR-jump detection
+   - Free-text `deviation:` rules that contain none of those keywords are
+     never statistically flagged — their floor (if any) is their only
+     detection mechanism; otherwise their data is still fetched and their
+     Grafana link still published, just never auto-flagged.
 
-## 2. Automated Chart Generation (PNG)
+## 2. Chart Generation (PNG)
 
-For each metric that deviates, `grafana_analyzer.py` automatically invokes `scripts/plot_helper.py` to generate static PNG charts.
-* High-resolution charts are saved to the `output/` directory (e.g., `output/chart_<region>_<metric_id>.png`).
-* If a metric requires a zoom window, the script slices the array in memory (`peak ± 30 mins`) and generates a second zoom PNG.
+For each metric that deviates and is **not** STATE-type, `grafana_analyzer.py`
+invokes `scripts/plot_helper.py` (via `subprocess`) to generate static PNG
+charts — STATE metrics are blanket-skipped (text bullets only).
+* High-resolution charts are saved to the `output/` directory
+  (e.g., `output/chart_<region>_<metric_slug>.png`), one solid line per
+  deviated instance plus a dotted red "Reference" threshold line.
+* A second zoom PNG (`..._zoom.png`, suffix `_zoom`) is generated around the
+  primary deviated series' peak timestamp (`± 30 min`), skipped silently if
+  the sliced window has fewer than 3 points.
+* Chart generation failures are non-fatal: a `WARN:` is printed to stderr and
+  the metric's text bullets are still emitted without an image tag.
 
 > NEVER use Native Confluence Chart Macros (`<ac:structured-macro ac:name="chart">`). They cause severe `StaleStateException` crashes. Only use the generated PNG attachments.
 
