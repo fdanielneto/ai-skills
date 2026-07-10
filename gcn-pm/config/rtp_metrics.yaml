@@ -6,7 +6,7 @@ RTPEngine Alive:
   status: active
   datasource: prometheus
   promql: sgn(rtpengine_uptime_seconds{region="$region",instance=~"rtpengine-edge-.*",service=~".*"})
-  deviation: flag any gap (result = 0 or series absent) lasting > 5 min.
+  deviation: flag any gap (result = 0 or series absent) lasting > 1 min.
   unit: binary 0/1
 "CPU Stats \u2014 RTPEngine":
   grafana: https://grafana-general.svc.talkdeskapp.com/goto/afolptd75jklce?orgId=1
@@ -20,7 +20,7 @@ RTPEngine Alive:
   "B \u2014 System": cpu_usage_system{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}
   "C \u2014 IOWait": cpu_usage_iowait{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}
   "D \u2014 Guest": cpu_usage_guest{region="$region",instance=~"rtpengine-edge.*",cpu="cpu-total"}
-  deviation: "type: RESOURCE \u2014 P95 > 80%."
+  deviation: "type: RESOURCE \u2014 P95 > 60%."
   unit: '% CPU'
 "System Load \u2014 RTPEngine":
   grafana: https://grafana-general.svc.talkdeskapp.com/goto/bfolpty78t4hsa?orgId=1

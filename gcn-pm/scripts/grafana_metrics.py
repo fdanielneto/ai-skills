@@ -158,9 +158,10 @@ class GrafanaHttpClient:
         end_s = self._fmt_time(end_time)
         if query_type == "range":
             start_s = self._fmt_time(start_time)
-            params = {"query": expr, "start": start_s, "end": end_s, "step": step or 60}
+            params = {"query": expr, "start": start_s, "end": end_s, "step": step or 60,
+                      "dedup": "true", "max_source_resolution": "auto"}
             return {"data": self._get(PROXY_RANGE_PATH.format(uid=datasource_uid), params)}
-        params = {"query": expr, "time": end_s}
+        params = {"query": expr, "time": end_s, "dedup": "true", "max_source_resolution": "auto"}
         return {"data": self._get(PROXY_INSTANT_PATH.format(uid=datasource_uid), params)}
 
     def _get(self, path, params):
@@ -197,6 +198,9 @@ class GrafanaHttpClient:
 def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, datasource_uid="prometheus"):
     """
     Query Prometheus via the shared Grafana HTTP client (range query).
+    Splits long time ranges into weekly chunks to stay under Grafana's
+    11 000 points-per-timeseries limit while keeping 1-minute resolution.
+
     Returns {"data": {"resultType": ..., "result": [...]}}.
 
     Per-query failures fall back to an empty result (preserves prior behaviour);
@@ -205,23 +209,59 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
     if region:
         promql = promql.replace("$region", region)
 
-    step = 300  # 5-minute resolution
+    step = 60
     start_s = start_epoch_ms // 1000
     end_s = end_epoch_ms // 1000
+    chunk_size = 10900 * step  # ~7.57 days
 
-    # Grafana dashboard macro: not valid raw PromQL. Substitute the actual sprint
-    # window duration so `increase(metric[$__range])` etc. become valid.
+    # Grafana dashboard macro: substitute the total sprint window duration.
     if "$__range" in promql:
         promql = promql.replace("$__range", f"{end_s - start_s}s")
 
-    try:
-        return client.query_prometheus(
-            datasource_uid, promql, end_s,
-            query_type="range", start_time=start_s, step=step,
-        )
-    except Exception as e:
-        print(f"WARN: query failed for {region or 'aggregated'}: {e}", file=sys.stderr)
+    # Merge key = frozenset of (label, value) pairs, so series with identical
+    # labels across chunks are grouped without a dependency on result order.
+    merged = {}
+
+    total_chunks = max(1, (end_s - start_s + chunk_size - 1) // chunk_size)
+    chunk_i = 0
+    chunk_start = start_s
+    while chunk_start < end_s:
+        chunk_i += 1
+        chunk_end = min(chunk_start + chunk_size, end_s)
+        print(f"    chunk {chunk_i}/{total_chunks}", file=sys.stderr)
+        try:
+            res = client.query_prometheus(
+                datasource_uid, promql, chunk_end,
+                query_type="range", start_time=chunk_start, step=step,
+            )
+        except Exception as e:
+            print(f"WARN: query failed for {region or 'aggregated'} ({chunk_start}..{chunk_end}): {e}", file=sys.stderr)
+            chunk_start = chunk_end
+            continue
+
+        for series in res.get("data", {}).get("result", []):
+            key = frozenset(series.get("metric", {}).items())
+            if key not in merged:
+                merged[key] = {"metric": series["metric"], "values": []}
+            merged[key]["values"].extend(series.get("values", []))
+
+        chunk_start = chunk_end
+
+    if not merged:
         return {"data": {"resultType": "matrix", "result": []}}
+
+    result = []
+    for key, entry in merged.items():
+        seen = set()
+        deduped = []
+        for ts, val in entry["values"]:
+            if ts not in seen:
+                seen.add(ts)
+                deduped.append([ts, val])
+        entry["values"] = deduped
+        result.append({"metric": dict(entry["metric"]), "values": entry["values"]})
+
+    return {"data": {"resultType": "matrix", "result": result}}
 
 
 def calculate_percentile(values, p):
@@ -393,13 +433,14 @@ def generate_chart(title, out_path, unit, payload):
         return False
 
 
-def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, region):
+def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, region, section="xcc"):
     """Analyze one metric and return HTML for its deviated series (or None).
 
     Runs BOTH the direct `promql` field and every A/B/C… sub-query, each under
     the metric's deviation rule. Sub-query results are labelled by their key so
     the reader sees which dimension (e.g. "A — 4xx only") deviated.
     """
+    print(f"  checking {section} {metric_name} deviation", file=sys.stderr)
     deviation_rule = config.get('deviation', '')
     unit = config.get('unit', '')
     floor_value = config.get('floor_value')
@@ -420,6 +461,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
 
     groups = []  # (sub_label, [ {instance, peak, timestamp, points} ])
     for sub_label, promql in queries:
+        print(f"  querying data to {section} {metric_name}", file=sys.stderr)
         res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
         deviated = []
         for series in res.get('data', {}).get('result', []):
@@ -441,8 +483,10 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
             groups.append((sub_label, deviated))
 
     if not groups:
+        print(f"  done {section} {metric_name} (no deviation)", file=sys.stderr)
         return None
 
+    print(f"  building {section} {metric_name}", file=sys.stderr)
     metric_slug = slugify(metric_name)
 
     html_output = ""
@@ -508,11 +552,12 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
 
     # One client/session per invocation, reused across all metrics.
     # A dead endpoint raises here (FAIL-FAST) instead of masking as "no deviation".
+    section = "xcc" if "xcc" in os.path.basename(config_file).lower() else "rtpengine"
     client = GrafanaHttpClient()
     try:
         for metric_name, cfg in config.items():
             if cfg.get('status') == 'active':
-                result = analyze_metric(client, metric_name, cfg, start_epoch_ms, end_epoch_ms, region)
+                result = analyze_metric(client, metric_name, cfg, start_epoch_ms, end_epoch_ms, region, section)
                 if result:
                     all_html += result
                     has_deviation = True
@@ -558,7 +603,10 @@ def main():
         start_epoch_ms = int(sys.argv[3])
         end_epoch_ms = int(sys.argv[4])
         region = sys.argv[5] if len(sys.argv) > 5 else None
-        print(analyze(config_file, start_epoch_ms, end_epoch_ms, region))
+        try:
+            print(analyze(config_file, start_epoch_ms, end_epoch_ms, region))
+        except Exception as e:
+            sys.exit(f"Error: {e}")
     else:
         sys.exit(__doc__)
 

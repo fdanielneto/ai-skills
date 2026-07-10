@@ -231,17 +231,20 @@ def fetch(start, end, mode="all"):
     print(f"Window: {gte} .. {lte}  ->  {TMP}")
 
     if mode in ("a1-a3", "all"):
+        print(f"  kibana: a1-a3...", file=sys.stderr)
         raw = search(a1_a3_body(gte, lte))
         total = raw.get("hits", {}).get("total", {})
         print(f"  a1-a3: hits.total={total} -> {_save('sbc_a1a3.json', raw)}")
 
     if mode in ("b1", "all"):
+        print(f"  kibana: b1...", file=sys.stderr)
         raw = search(b1_body(gte, lte))
         ribbons = raw.get("aggregations", {}).get("ribbons", {}).get("buckets", {})
         counts = {k: v.get("doc_count") for k, v in ribbons.items()}
         print(f"  b1: {counts} -> {_save('sbc_b1.json', raw)}")
 
     if mode in ("b2", "all"):
+        print(f"  kibana: b2 ({len(SBCS)} SBCs)...", file=sys.stderr)
         for sbc in SBCS:
             raw = search(b2_body(gte, lte, sbc))
             buckets = raw.get("aggregations", {}).get("timeline", {}).get("buckets", [])
@@ -355,6 +358,7 @@ def analyze_b1(raw_data):
 
 def analyze_b2(raw_data, sbc_name):
     """Per-SBC call attempts timeline -> PNG + ready-to-embed <ac:image> tag."""
+    print(f"  sbc chart: {sbc_name}...", file=sys.stderr)
     buckets = raw_data.get('aggregations', {}).get('timeline', {}).get('buckets', [])
     payload = {
         "lines": [{
