@@ -13,7 +13,7 @@ dropdowns, rendered immediately AFTER the "XCC Metrics" section.
 > parameters" note. This applies per metric. A region block with zero
 > deviations contains only the Grafana dashboard link (one line).
 
-> **TOKEN REDUCTION PIPELINE**: Do NOT process the metrics math here manually. The configuration is stored in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. Use `scripts/grafana_analyzer.py` to evaluate the deviations. Only write about the metrics that `grafana_analyzer.py` flags as deviated.
+> **TOKEN REDUCTION PIPELINE**: Do NOT process the metrics math here manually. The configuration is stored in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. Use `scripts/grafana_metrics.py analyze` to evaluate the deviations. Only write about the metrics that it flags as deviated.
 
 ## Structure (in order)
 
@@ -82,7 +82,7 @@ When a metric deviates:
 > SILENCE RULE (UPDATED): **Publish only deviating metrics.** If a metric is within normal range, emit nothing for that metric. If ALL metrics are within range for a region, the block contains the Grafana link followed by: `No deviation detected ✅`.
 
 For each region R:
-1. Run `scripts/grafana_analyzer.py` for region R (see "GENERIC DEVIATION & CHART
+1. Run `scripts/grafana_metrics.py analyze` for region R (see "GENERIC DEVIATION & CHART
    GENERATION" below) — it fetches every `status: active` metric, applies the
    statistical deviation rule, and emits ready-to-embed HTML (reference scalar,
    finding bullets, chart `<ac:image>` tags for non-STATE deviations) for every
@@ -95,11 +95,11 @@ For each region R:
 
 ### GENERIC DEVIATION & CHART GENERATION
 
-**CRITICAL**: You MUST use the `bash` tool to execute `scripts/grafana_analyzer.py` for each region, passing the `rtp_metrics.yaml` config. The script handles fetching data, detecting deviations, generating PNG charts (overview + zoom, STATE metrics excluded), and outputting the exact HTML snippet.
+**CRITICAL**: You MUST use the `bash` tool to execute `scripts/grafana_metrics.py analyze` for each region, passing the `rtp_metrics.yaml` config. The script handles fetching data, detecting deviations, generating PNG charts (overview + zoom, STATE metrics excluded), and outputting the exact HTML snippet.
 
 The script takes **epoch milliseconds**, not dates — convert first (e.g. `date -j -f "%Y-%m-%dT%H:%M:%S" "2026-06-10T00:00:00" +%s000`).
 
-Example: `python3 scripts/grafana_analyzer.py /path/to/rtp_metrics.yaml 1781049600000 1782691199000 eu-south-1`
+Example: `python3 scripts/grafana_metrics.py analyze /path/to/rtp_metrics.yaml 1781049600000 1782691199000 eu-south-1`
 
 Your job is to run this script for each region and place its output inside the correct expandable block. Do not second-guess the math or write manual metric bullets.
 
@@ -230,7 +230,7 @@ block contains only the word "OK" and below the Grafana dashboard link (one line
 ## Metrics to analyse
 
 Full definitions (PromQL, deviation rule, unit) live in
-`config/rtp_metrics.yaml` — that file is what `scripts/grafana_analyzer.py`
+`config/rtp_metrics.yaml` — that file is what `scripts/grafana_metrics.py analyze`
 actually reads; this table is a human-readable index only.
 
 | Metric | Description / purpose | Status |

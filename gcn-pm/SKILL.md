@@ -73,7 +73,7 @@ If the user wants another attempt, they will invoke `/gcn-pm` again.
 1. Dispatch one subagent task per requested section token.
 2. DO NOT inject file contents into the subagent prompt. Instead, provide only the sprint dates, region filter, and the relative path to the section's reference file, instructing the subagent to save its HTML output locally. Instruct the subagent to use the `read` tool on-demand to load its specific reference file.
 3. Load `references/publish.md` only for the final Publisher subagent — not before.
-4. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents that run `scripts/fetch_sbc_data.py` (plain HTTP with the saved session cookie — see the auth procedure in `references/sbc-metrics.md`) and format the results as PNG charts via `scripts/sbc_analyzer.py` + `<ac:image>` tags (see `references/metric-analysis-engine.md` — Native Confluence Chart macros are never used, they cause `StaleStateException` crashes).
+4. For `sbc-metrics` data collection, you MUST act as a mini-orchestrator, dispatching isolated subagents that run `scripts/kibana_metrics.py fetch` (plain HTTP with the saved session cookie — see the auth procedure in `references/sbc-metrics.md`) and format the results as PNG charts via `scripts/kibana_metrics.py analyze` + `<ac:image>` tags (see `references/metric-analysis-engine.md` — Native Confluence Chart macros are never used, they cause `StaleStateException` crashes).
 
 
 
@@ -81,8 +81,8 @@ If the user wants another attempt, they will invoke `/gcn-pm` again.
 
 To minimize token usage and improve deterministic accuracy, this skill heavily relies on python scripts:
 
-1. **`scripts/grafana_analyzer.py`**: Executes Grafana PromQL queries, calculates P95/MAD/IQR, and determines deviations automatically based on rules defined in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. The subagent ONLY receives the summary output (e.g. "Deviations found: Alive dropped below 1").
-2. **`scripts/sbc_analyzer.py`**: Replaces `kb-proxy.js`. Filters, aggregates and computes percentages from Kibana Elasticsearch payloads. Returns pre-formatted Markdown tables, eliminating the need for the LLM to parse thousands of lines of logs.
+1. **`scripts/grafana_metrics.py analyze`**: Executes Grafana PromQL queries, calculates P95/MAD/IQR, and determines deviations automatically based on rules defined in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. The subagent ONLY receives the summary output (e.g. "Deviations found: Alive dropped below 1"). Auth (`refresh`/`read`), fetch, analysis, and chart generation all live in this one script.
+2. **`scripts/kibana_metrics.py fetch` / `analyze`**: Replaces `kb-proxy.js`. Filters, aggregates and computes percentages from Kibana Elasticsearch payloads. Returns pre-formatted Markdown tables, eliminating the need for the LLM to parse thousands of lines of logs. Auth, fetch, analysis, and chart generation all live in this one script.
 3. **`scripts/confluence_publish.py`**: Publishes the assembled Confluence Storage HTML — reads current page version, PUTs the full body with `representation: "storage"`, and runs the post-publish verification gate. Called once, by the Publisher subagent only. See `references/publish.md`.
 
 DO NOT parse raw Kibana or Grafana JSONs directly in the LLM. ALWAYS route the data through these scripts.

@@ -14,22 +14,22 @@ All region/Ribbon dropdowns are collapsed-by-default expand macros.
 ### Source — Kibana (Elasticsearch over plain HTTP)
 
 Call records live in `kibana-logging.svc.talkdeskapp.com` (index
-`logs-td-ribbonsbc-cdr*`). There is exactly **one** data-collection method,
-empirically validated (see `scripts/test_kibana_auth.py`):
+`logs-td-ribbonsbc-cdr*`). There is exactly **one** data-collection method:
 
-- `scripts/fetch_sbc_data.py <start> <end> [a1-a3|b1|b2|all]` runs every ES
-  query as **plain HTTP** against Kibana's `/internal/search/es` endpoint —
+- `scripts/kibana_metrics.py fetch <start> <end> [a1-a3|b1|b2|all]` runs every
+  ES query as **plain HTTP** against Kibana's `/internal/search/es` endpoint —
   no browser in the data path. It writes raw ES responses to `tmp/` ready to
-  pipe into `sbc_analyzer.py`.
+  pipe into `scripts/kibana_metrics.py analyze`.
 - Auth is a Vouch SSO session cookie kept in `gcn-pm/.auth/vouch_cookie.txt`
-  (gitignored, chmod 600), maintained by `scripts/kibana_auth.py`. A browser
-  (Playwright, persistent Chrome profile) is used **only** by
-  `kibana_auth.py refresh` to obtain/renew that cookie — never per query.
+  (gitignored, chmod 600), maintained by the same script's `refresh`
+  subcommand. A browser (Playwright, persistent Chrome profile) is used
+  **only** by `kibana_metrics.py refresh` to obtain/renew that cookie — never
+  per query.
 
 **Authentication procedure:**
-1. Run `python3 scripts/fetch_sbc_data.py ...` directly.
+1. Run `python3 scripts/kibana_metrics.py fetch ...` directly.
 2. If it reports an expired/missing session, run
-   `python3 scripts/kibana_auth.py refresh` once (headless if the Chrome
+   `python3 scripts/kibana_metrics.py refresh` once (headless if the Chrome
    profile still has a live Google session; otherwise it opens a window for
    one manual login), then retry the fetch.
 3. If authentication still fails after the refresh, abort with `[FATAL_AUTH_ERROR]`.
@@ -55,11 +55,12 @@ Each sub-region corresponds to exactly **one SBC**. Filters in §B must use the
 ### Collection rules
 
 Execute the collection tasks below with the `bash` tool: run
-`scripts/fetch_sbc_data.py` (which performs the queries over plain HTTP using
-the saved session cookie) and pipe each saved response into `sbc_analyzer.py`.
+`scripts/kibana_metrics.py fetch` (which performs the queries over plain HTTP
+using the saved session cookie) and pipe each saved response into
+`scripts/kibana_metrics.py analyze`.
 
 **CRITICAL: ISOLATION BY SUBAGENT**
-To prevent context bloat, the orchestrator launches **one isolated subagent per task**. Each subagent runs `fetch_sbc_data.py` + `sbc_analyzer.py` via `bash` for its specific assignment and writes the final Confluence HTML/macro output to a local temporary file.
+To prevent context bloat, the orchestrator launches **one isolated subagent per task**. Each subagent runs `kibana_metrics.py fetch` + `kibana_metrics.py analyze` via `bash` for its specific assignment and writes the final Confluence HTML/macro output to a local temporary file.
 
 Wait for each subagent to execute its calls and return ONLY the final scalar value, Markdown table, or Confluence XML macro.
 
@@ -164,7 +165,7 @@ For **each of the 8 individual SBCs**, an expandable dropdown (sub-region name a
 
 Inside each dropdown:
 1.  Run the B-2 ES query (see § B-2 below), then pipe the response into
-    `python3 scripts/sbc_analyzer.py b2 <SBC_NAME>` (e.g. `PRDEUS1RSBC`).
+    `python3 scripts/kibana_metrics.py analyze b2 <SBC_NAME>` (e.g. `PRDEUS1RSBC`).
 2.  The script generates the PNG locally and prints the ready `<ac:image>` tag.
 3.  Paste that tag directly — do not build the image tag by hand.
 
@@ -173,26 +174,26 @@ Inside each dropdown:
 ## Notes
 - **IMAGE ALIGNMENT**: All `<ac:image>` tags MUST carry `ac:align="center" ac:width="950"`.
 - **NO-TODO / FALLBACK**: Never fabricate values. If a required tool is genuinely unavailable, emit a warning macro only. Do not emit `[TODO]`.
-- **FAIL-FAST RULE**: If the Kibana source returns an authentication error (like a Google OAuth login page) or is unreachable even after one `kibana_auth.py refresh`, you MUST return exactly the string `[FATAL_AUTH_ERROR]`. Do not generate warning panels or XML macros.
+- **FAIL-FAST RULE**: If the Kibana source returns an authentication error (like a Google OAuth login page) or is unreachable even after one `kibana_metrics.py refresh`, you MUST return exactly the string `[FATAL_AUTH_ERROR]`. Do not generate warning panels or XML macros.
 - The Disconnect Codes by Region tables (§B-1) are placed at the top of §B, before the per-region dropdowns.
 - Mirror example pages (IC260508 / IC260522) for per-Ribbon dashboard order.
 # SBC Collection API Payloads
 
 **Load this file when you are ready to collect SBC/Kibana data.**
 
-All queries below are implemented in `scripts/fetch_sbc_data.py` — run it via
-the `bash` tool (plain HTTP, saved session cookie; see the Authentication
+All queries below are implemented in `scripts/kibana_metrics.py fetch` — run it
+via the `bash` tool (plain HTTP, saved session cookie; see the Authentication
 procedure above). The JSON payloads are documented here as the reference for
 what the script executes:
 
 ```
-python3 scripts/fetch_sbc_data.py <START> <END> a1-a3   -> tmp/sbc_a1a3.json
-python3 scripts/fetch_sbc_data.py <START> <END> b1      -> tmp/sbc_b1.json
-python3 scripts/fetch_sbc_data.py <START> <END> b2      -> tmp/sbc_b2_<SBC>.json (8 files)
+python3 scripts/kibana_metrics.py fetch <START> <END> a1-a3   -> tmp/sbc_a1a3.json
+python3 scripts/kibana_metrics.py fetch <START> <END> b1      -> tmp/sbc_b1.json
+python3 scripts/kibana_metrics.py fetch <START> <END> b2      -> tmp/sbc_b2_<SBC>.json (8 files)
 ```
 
 **CRITICAL RULE FOR ALL SUBAGENTS:**
-1. If `fetch_sbc_data.py` reports an authentication error even after one `kibana_auth.py refresh`, you MUST return exactly the string `[FATAL_AUTH_ERROR]` along with a brief description. Do not generate warning panels or XML macros.
+1. If `kibana_metrics.py fetch` reports an authentication error even after one `kibana_metrics.py refresh`, you MUST return exactly the string `[FATAL_AUTH_ERROR]` along with a brief description. Do not generate warning panels or XML macros.
 2. Otherwise, return ONLY the final Markdown table or Confluence XML macro requested. Do not return raw JSON responses or extra prose.
 
 ---
@@ -235,10 +236,10 @@ Execute the following Elasticsearch JSON query (substitute `<START_SPRINT_DATE>`
 ```
 
 **Return format:**
-Run `python3 scripts/sbc_analyzer.py a1-a3 tmp/sbc_a1a3.json`; paste
+Run `python3 scripts/kibana_metrics.py analyze a1-a3 tmp/sbc_a1a3.json`; paste
 its stdout verbatim (it prints the A-1 table then the A-3 table, in order —
 do NOT hand-compute counts or percentages). Note: A-3's "Top 10" may render
-fewer than 10 rows — `sbc_analyzer.py` silently drops disconnect-reason
+fewer than 10 rows — the script silently drops disconnect-reason
 buckets under 0.5% of total (a deliberate token-saving filter); that's
 expected, not a regression.
 
@@ -297,7 +298,7 @@ avoids 4 separate round-trips.
 ```
 
 **Return format:**
-Run `python3 scripts/sbc_analyzer.py b1 tmp/sbc_b1.json`;
+Run `python3 scripts/kibana_metrics.py analyze b1 tmp/sbc_b1.json`;
 paste its stdout verbatim — it already prints the complete `<ac:layout>`
 with all four mini-tables in the 2+2 layout described above. Do not
 hand-compute totals or percentages.
@@ -335,7 +336,7 @@ Substitute `<SBC_NAME>`.
 ```
 
 **Return format:**
-Run `python3 scripts/sbc_analyzer.py b2 <SBC_NAME> tmp/sbc_b2_<SBC_NAME>.json`;
+Run `python3 scripts/kibana_metrics.py analyze b2 <SBC_NAME> tmp/sbc_b2_<SBC_NAME>.json`;
 it generates `output/sbc_timeline_<SBC_NAME>.png` and prints the ready
 `<ac:image>` tag on stdout — paste that directly, do not build the chart JSON
 or call `plot_helper.py` yourself.

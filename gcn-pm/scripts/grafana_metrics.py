@@ -1,21 +1,202 @@
 #!/usr/bin/env python3
+"""Grafana/Prometheus pipeline for gcn-pm: auth, fetch, deviation analysis, charts.
+
+Subcommands:
+  refresh                       Vouch SSO bootstrap (Playwright). Launches Chrome
+                                 (persistent profile under gcn-pm/.auth/profile,
+                                 shared with kibana_metrics.py — same SSO identity),
+                                 navigates to Grafana, exports the Vouch cookies to
+                                 gcn-pm/.auth/grafana_vouch_cookie.txt (chmod 600).
+                                 Headless if the profile already has a live session;
+                                 opens a visible window for the one-time Google
+                                 login otherwise.
+  read                           Print the saved Cookie header value (non-zero
+                                 exit if missing).
+  analyze <config_yaml> <start_epoch_ms> <end_epoch_ms> [region]
+                                 Query every active metric in config_yaml over
+                                 plain HTTP (Grafana's Prometheus datasource
+                                 proxy), detect deviations (P95/MAD/IQR + floor
+                                 bypass), render PNG charts, and print the
+                                 Confluence Storage HTML snippet.
+
+Data-path code (analyze) must only ever call cookie_header() / `read` — never
+drive a browser or prompt for login itself; that's `refresh`'s job alone.
+"""
 import json
 import os
 import re
-import subprocess
+import stat
 import sys
+import time
 import yaml
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
-from grafana_mcp_client import GrafanaMcpClient
+import plot_helper
+
+SKILL_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+AUTH_DIR = os.path.join(SKILL_DIR, ".auth")
+PROFILE_DIR = os.path.join(AUTH_DIR, "profile")
+COOKIE_FILE = os.path.join(AUTH_DIR, "grafana_vouch_cookie.txt")
+OUTPUT_DIR = os.path.join(SKILL_DIR, "output")
+
+GRAFANA_ORIGIN = "https://grafana-general.svc.talkdeskapp.com"
+GRAFANA_URL = GRAFANA_ORIGIN + "/"
+PROXY_RANGE_PATH = "/api/datasources/proxy/uid/{uid}/api/v1/query_range"
+PROXY_INSTANT_PATH = "/api/datasources/proxy/uid/{uid}/api/v1/query"
 
 # Sub-query keys look like "A — User", "B — 4xx only" (single letter, space, dash).
 SUBQUERY_KEY = re.compile(r'^[A-Z] [—\-]')
 
+
+# ==================== auth ====================
+
+def cookie_header():
+    """Return the saved Cookie header value, or raise with refresh instructions."""
+    try:
+        with open(COOKIE_FILE) as f:
+            value = f.read().strip()
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"No Grafana session cookie at {COOKIE_FILE} — "
+            "run: python3 gcn-pm/scripts/grafana_metrics.py refresh"
+        )
+    if not value:
+        raise RuntimeError(
+            f"Empty cookie file {COOKIE_FILE} — "
+            "run: python3 gcn-pm/scripts/grafana_metrics.py refresh"
+        )
+    return value
+
+
+def _export_cookies(context):
+    # every cookie the browser would send to the Grafana origin
+    # (VouchCookie on .svc.talkdeskapp.com + Grafana's own session, etc.)
+    cookies = context.cookies(GRAFANA_ORIGIN)
+    if not cookies:
+        return False
+    header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+    os.makedirs(AUTH_DIR, exist_ok=True)
+    os.chmod(AUTH_DIR, 0o700)
+    with open(COOKIE_FILE, "w") as f:
+        f.write(header + "\n")
+    os.chmod(COOKIE_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 600
+    print(f"Saved {', '.join(c['name'] for c in cookies)} -> {COOKIE_FILE}")
+    return True
+
+
+def _try_session(headless):
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            PROFILE_DIR, channel="chrome", headless=headless)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(GRAFANA_URL, wait_until="domcontentloaded", timeout=60000)
+        # success = the redirect chain lands back on the exact Grafana host;
+        # oauth.svc.talkdeskapp.com (the login page) must NOT count
+        if headless:
+            page.wait_for_timeout(5000)  # allow Vouch redirect chain to settle
+            ok = page.url.startswith(GRAFANA_ORIGIN) and _export_cookies(context)
+        else:
+            print("Complete the Google login in the browser window...")
+            ok = False
+            for _ in range(36):  # max ~3 min
+                page.wait_for_timeout(5000)
+                if page.url.startswith(GRAFANA_ORIGIN) and _export_cookies(context):
+                    ok = True
+                    break
+        context.close()
+        return ok
+
+
+def refresh():
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    os.chmod(AUTH_DIR, 0o700)
+    if _try_session(headless=True):
+        return
+    print("Headless session expired/absent — opening browser for login.")
+    if not _try_session(headless=False):
+        sys.exit("Login did not complete; no Vouch cookie captured.")
+
+
+# ==================== HTTP client ====================
+
+class GrafanaHttpClient:
+    def __init__(self, origin=GRAFANA_ORIGIN, timeout=60):
+        self.origin = origin
+        self.timeout = timeout
+        self._verify_session()
+
+    def _verify_session(self):
+        """Eagerly probe the session so a dead/expired cookie raises here, in
+        the caller's constructor line — not silently inside the per-query
+        try/except in analyze_metric()'s query_prometheus() wrapper, which
+        would otherwise turn an auth failure into a false 'no deviation'
+        result for every metric (violates the FAIL-FAST rule)."""
+        now = int(time.time())
+        self._get(PROXY_RANGE_PATH.format(uid="prometheus"),
+                  {"query": "up", "start": now - 60, "end": now, "step": 60})
+
+    @staticmethod
+    def _fmt_time(t):
+        """Prometheus query_range wants Unix epoch seconds."""
+        if isinstance(t, (int, float)):
+            return int(t)
+        raise TypeError(f"expected epoch seconds, got {t!r}")
+
+    def query_prometheus(self, datasource_uid, expr, end_time, query_type="instant",
+                          start_time=None, step=None):
+        """Query Prometheus via Grafana's datasource proxy.
+
+        Returns {"data": {"resultType": ..., "result": [...]}} so callers can do
+        res["data"]["result"]. Raises RuntimeError on auth/session failure,
+        Exception on any other HTTP/Prometheus error.
+        """
+        end_s = self._fmt_time(end_time)
+        if query_type == "range":
+            start_s = self._fmt_time(start_time)
+            params = {"query": expr, "start": start_s, "end": end_s, "step": step or 60}
+            return {"data": self._get(PROXY_RANGE_PATH.format(uid=datasource_uid), params)}
+        params = {"query": expr, "time": end_s}
+        return {"data": self._get(PROXY_INSTANT_PATH.format(uid=datasource_uid), params)}
+
+    def _get(self, path, params):
+        url = f"{self.origin}{path}?{urlencode(params)}"
+        req = Request(url, method="GET")
+        req.add_header("Accept", "application/json")
+        req.add_header("Cookie", cookie_header())
+
+        try:
+            resp = urlopen(req, timeout=self.timeout)
+            body = resp.read().decode()
+        except HTTPError as e:
+            raise Exception(f"grafana proxy: HTTP {e.code}: {e.read().decode()[:300]}")
+
+        if body.lstrip().startswith("<"):
+            raise RuntimeError(
+                "ERROR: Grafana returned an SSO/login page — session expired. "
+                "Run: python3 gcn-pm/scripts/grafana_metrics.py refresh"
+            )
+
+        data = json.loads(body)
+        if data.get("status") != "success" or "result" not in data.get("data", {}):
+            raise Exception(f"grafana proxy: unexpected response, keys={list(data)[:10]}")
+        return data["data"]
+
+    def close(self):
+        """No subprocess/connection to tear down — kept as a no-op so
+        analyze()'s `finally: client.close()` needs no change."""
+        pass
+
+
+# ==================== analysis ====================
+
 def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, datasource_uid="prometheus"):
     """
-    Query Prometheus via the shared grafana-mcp client (range query).
+    Query Prometheus via the shared Grafana HTTP client (range query).
     Returns {"data": {"resultType": ..., "result": [...]}}.
 
     Per-query failures fall back to an empty result (preserves prior behaviour);
@@ -42,6 +223,7 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
         print(f"WARN: query failed for {region or 'aggregated'}: {e}", file=sys.stderr)
         return {"data": {"resultType": "matrix", "result": []}}
 
+
 def calculate_percentile(values, p):
     """Calculate p-th percentile (0-100)."""
     if not values:
@@ -49,6 +231,7 @@ def calculate_percentile(values, p):
     sorted_vals = sorted(values)
     idx = int((p / 100.0) * (len(sorted_vals) - 1))
     return sorted_vals[min(idx, len(sorted_vals) - 1)]
+
 
 def calculate_mad(values):
     """Calculate median and median absolute deviation."""
@@ -64,6 +247,7 @@ def calculate_mad(values):
 
     return median, mad
 
+
 def calculate_iqr(values):
     """Calculate Q1, Q3, and IQR."""
     if len(values) < 4:
@@ -76,12 +260,14 @@ def calculate_iqr(values):
     q3 = sorted_vals[q3_idx]
     return q1, q3, q3 - q1
 
+
 def detect_deviation_resource(metric_name, values, threshold_pct=95):
     """Resource metrics: flag if P95 exceeds threshold."""
     if not values:
         return False, 0
     p95 = calculate_percentile(values, threshold_pct)
     return p95 > 80, p95  # hardcoded 80% as example threshold
+
 
 def detect_deviation_spike(values):
     """Rate/spike metrics: flag if max > median + 3*MAD."""
@@ -91,6 +277,7 @@ def detect_deviation_spike(values):
     median, mad = calculate_mad(values)
     threshold = median + (3 * mad)
     return peak_val > threshold, peak_val
+
 
 def detect_deviation_state(values):
     """State metrics: flag a jump above median + 2*IQR, or sustained zeros (>50%)."""
@@ -104,6 +291,7 @@ def detect_deviation_state(values):
     if sum(1 for v in values if v == 0) > len(values) * 0.5:
         return True, 0
     return False, peak_val
+
 
 def detect_deviation(deviation_rule, values):
     """Dispatch on the metric's declared deviation type.
@@ -123,6 +311,7 @@ def detect_deviation(deviation_rule, values):
         return detect_deviation_state(values)
     return False, max(values)
 
+
 def check_floor(floor_value, floor_op, values):
     """Floor bypass: flag immediately if any point crosses the metric's hard
     floor, without waiting for the statistical rule. `floor_op` picks the
@@ -137,12 +326,14 @@ def check_floor(floor_value, floor_op, values):
         return max(values) > floor_value
     return max(values) >= floor_value  # gte (default)
 
+
 def series_label(metric):
     """Human label for a series: prefer instance, then a name-ish label."""
     for key in ('instance', 'name', 'metric', 'xheader', '__name__'):
         if metric.get(key):
             return metric[key]
     return 'aggregated'
+
 
 def series_points(series):
     """Return [(ts, value), ...] for either a range (values) or instant (value) series."""
@@ -157,22 +348,26 @@ def series_points(series):
             continue
     return points
 
+
 def format_timestamp(epoch_s):
     """Convert a Prometheus timestamp (Unix epoch seconds) to ISO format."""
     return datetime.fromtimestamp(float(epoch_s), tz=timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
+
 
 def build_grafana_url(base_url, region, start_ms, end_ms):
     """Build parameterized Grafana URL."""
     return f"{base_url}&var-region={region}&from={start_ms}&to={end_ms}"
 
+
 def slugify(text):
     """lowercase, non-alphanumeric -> underscore (matches existing chart_<region>_<slug>.png convention)."""
     return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
 
-def format_points(points):
-    """[(epoch_s, val), ...] -> plot_helper.py's expected [{"x": "YYYY-MM-DD HH:MM", "y": val}, ...].
 
-    plot_helper.py's parser only accepts a bare date or '%Y-%m-%d %H:%M' (space,
+def format_points(points):
+    """[(epoch_s, val), ...] -> plot_helper's expected [{"x": "YYYY-MM-DD HH:MM", "y": val}, ...].
+
+    plot_helper's parser only accepts a bare date or '%Y-%m-%d %H:%M' (space,
     not ISO 'T'/'Z') — feeding it anything else silently falls back to a string
     x-axis.
     """
@@ -181,22 +376,22 @@ def format_points(points):
         for ts, val in points
     ]
 
+
 def slice_zoom(points, center_ts, window_s=1800):
     """Points within center_ts +/- window_s (default 30 min)."""
     return [(ts, v) for ts, v in points if center_ts - window_s <= ts <= center_ts + window_s]
 
+
 def generate_chart(title, out_path, unit, payload):
-    """Shell out to plot_helper.py. Never raises: a broken chart must not fail the metric."""
-    plot_helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plot_helper.py")
+    """Render via plot_helper.render_chart(). Never raises: a broken chart
+    must not fail the metric."""
     try:
-        subprocess.run(
-            [sys.executable, plot_helper, title, out_path, "Time", unit, json.dumps(payload)],
-            check=True, capture_output=True, text=True,
-        )
+        plot_helper.render_chart(title, out_path, "Time", unit, payload)
         return True
     except Exception as e:
         print(f"WARN: chart generation failed for '{title}': {e}", file=sys.stderr)
         return False
+
 
 def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, region):
     """Analyze one metric and return HTML for its deviated series (or None).
@@ -274,7 +469,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
             "lines": [{"label": dev["instance"], "points": format_points(dev["points"])} for dev in deviated],
             "threshold": {"label": "Reference", "value": reference},
         }
-        overview_path = f"output/chart_{region_tag}_{group_slug}.png"
+        overview_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}.png")
         if generate_chart(title, overview_path, unit, overview_payload):
             html_output += (
                 f'<ac:image ac:align="center" ac:width="950">'
@@ -290,7 +485,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
                     zoom_lines.append({"label": dev["instance"], "points": format_points(zoomed)})
             if zoom_lines:
                 zoom_payload = {"lines": zoom_lines, "threshold": {"label": "Reference", "value": reference}}
-                zoom_path = f"output/chart_{region_tag}_{group_slug}_zoom.png"
+                zoom_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}_zoom.png")
                 if generate_chart(f"{title} (zoom)", zoom_path, unit, zoom_payload):
                     html_output += (
                         f'<ac:image ac:align="center" ac:width="950">'
@@ -299,17 +494,11 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
 
     return html_output
 
-def main():
-    if len(sys.argv) < 4:
-        print("Usage: grafana_analyzer.py <config_yaml> <start_epoch_ms> <end_epoch_ms> [region]")
-        sys.exit(1)
 
-    config_file = sys.argv[1]
-    start_epoch_ms = int(sys.argv[2])
-    end_epoch_ms = int(sys.argv[3])
-    region = sys.argv[4] if len(sys.argv) > 4 else None
-
-    os.makedirs("output", exist_ok=True)
+def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
+    """Run the full fetch + deviation-detection + chart pipeline for every
+    active metric in config_file. Returns the Confluence Storage HTML block."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     with open(config_file, 'r') as f:
         config = yaml.safe_load(f)
@@ -319,7 +508,7 @@ def main():
 
     # One client/session per invocation, reused across all metrics.
     # A dead endpoint raises here (FAIL-FAST) instead of masking as "no deviation".
-    client = GrafanaMcpClient()
+    client = GrafanaHttpClient()
     try:
         for metric_name, cfg in config.items():
             if cfg.get('status') == 'active':
@@ -347,7 +536,32 @@ def main():
     else:
         final_html += "<p>No deviation detected ✅</p>\n"
 
-    print(final_html)
+    return final_html
+
+
+# ==================== CLI ====================
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    if mode == "refresh":
+        refresh()
+    elif mode == "read":
+        try:
+            print(cookie_header())
+        except RuntimeError as e:
+            sys.exit(f"{e}")
+    elif mode == "analyze":
+        if len(sys.argv) < 5:
+            sys.exit("Usage: grafana_metrics.py analyze <config_yaml> <start_epoch_ms> <end_epoch_ms> [region]")
+        config_file = sys.argv[2]
+        start_epoch_ms = int(sys.argv[3])
+        end_epoch_ms = int(sys.argv[4])
+        region = sys.argv[5] if len(sys.argv) > 5 else None
+        print(analyze(config_file, start_epoch_ms, end_epoch_ms, region))
+    else:
+        sys.exit(__doc__)
+
 
 if __name__ == "__main__":
     main()

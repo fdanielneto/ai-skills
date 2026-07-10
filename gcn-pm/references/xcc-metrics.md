@@ -14,7 +14,27 @@ Engine, per the requester's decision).
 
 ---
 
-> **TOKEN REDUCTION PIPELINE**: Do NOT process the metrics math here manually. The configuration is stored in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. Use `scripts/grafana_analyzer.py` to evaluate the deviations. Only write about the metrics that `grafana_analyzer.py` flags as deviated.
+> **TOKEN REDUCTION PIPELINE**: Do NOT process the metrics math here manually. The configuration is stored in `config/xcc_metrics.yaml` and `config/rtp_metrics.yaml`. Use `scripts/grafana_metrics.py analyze` to evaluate the deviations. Only write about the metrics that it flags as deviated.
+
+### DATA COLLECTION / Grafana auth
+
+Grafana (`grafana-general.svc.talkdeskapp.com`) is queried over **plain
+HTTP** via `scripts/grafana_metrics.py`'s in-process `GrafanaHttpClient` —
+no MCP, no browser per query. Auth is a Vouch SSO session cookie kept in
+`gcn-pm/.auth/grafana_vouch_cookie.txt` (gitignored, chmod 600), maintained
+by the same script's `refresh` subcommand. A browser (Playwright, persistent
+Chrome profile shared with `kibana_metrics.py`) is used **only** by
+`grafana_metrics.py refresh` to obtain/renew that cookie — never per query.
+Same pattern as Kibana; see `references/sbc-metrics.md` §DATA COLLECTION for
+the full rationale.
+
+**Authentication procedure:**
+1. Run `scripts/grafana_metrics.py analyze` (or the direct query) as normal.
+2. If it reports an expired/missing session, run
+   `python3 scripts/grafana_metrics.py refresh` once, then retry.
+3. If authentication still fails after the refresh, abort with
+   `[FATAL_AUTH_ERROR]` (see FAIL-FAST RULE below) — do not generate warning
+   panels or retry in a loop.
 
 ## Structure (in order)
 
@@ -26,11 +46,11 @@ An expandable block titled **XCC - Host Details** containing ONE table with one
 row per region.
 
 #### Data fetch (most performant — chosen over rendering the Grafana view)
-Run a single INSTANT PromQL query via the Grafana MCP and read the labels off
-each returned series — no browser, no per-host series to dedupe:
+Run a single INSTANT PromQL query via `scripts/grafana_metrics.py`'s
+`GrafanaHttpClient.query_prometheus(..., query_type="instant")` and read the
+labels off each returned series — no browser, no per-host series to dedupe:
 
 ```
-tool:   grafana-mcp-prd:query_prometheus
 datasourceUid: prometheus
 queryType:     instant
 endTime:       now
@@ -50,9 +70,11 @@ do NOT take a screenshot — the table is built from the query result directly.
 
 > MANDATORY: this table must contain the REAL values returned by the query
 > (e.g. `xcc-v5.0.2` / `c5.xlarge`), exactly as it did in the working v37 run.
-> NEVER emit `[TODO]` or `[TODO]`-style placeholder cells. If the Grafana MCP is
-> unavailable, emit a single `warning` panel for the whole sub-section stating
-> the Grafana MCP was unavailable — do not publish an empty/`[TODO]` table.
+> NEVER emit `[TODO]` or `[TODO]`-style placeholder cells. If Grafana returns an
+> auth error (session cookie expired — see DATA COLLECTION / Grafana auth
+> below), run `python3 scripts/grafana_metrics.py refresh` once and retry. If it
+> still fails, emit a single `warning` panel for the whole sub-section stating
+> Grafana was unavailable — do not publish an empty/`[TODO]` table.
 
 #### Detecting version / instance-type changes during the sprint
 
@@ -171,7 +193,7 @@ When a metric deviates:
 > DATA SOURCE RULE: analyse ALL metrics listed in the **Appendix: XCC Data Sources**, in
 > section order. For metrics with `status: active`, fetching, deviation detection
 > (floor-bypass + statistical rule), and chart generation are handled entirely by
-> `scripts/grafana_analyzer.py` — see "GENERIC DEVIATION & CHART GENERATION" below;
+> `scripts/grafana_metrics.py analyze` — see "GENERIC DEVIATION & CHART GENERATION" below;
 > just run the script. For metrics with `status: reference`, open the Grafana link
 > and include it in the report only if a deviation is visible; skip the metric
 > entirely if everything looks normal.
@@ -179,7 +201,7 @@ When a metric deviates:
 > SILENCE RULE (UPDATED): **Publish only deviating metrics.** If a metric is within its normal range, emit nothing. If ALL metrics for a region are within normal range, the region block contains the Grafana dashboard link followed by: `No deviation detected ✅`.
 
 For each region R (scoped to `role="edgerouter", region="R"`):
-1. Run `scripts/grafana_analyzer.py` for region R (see "GENERIC DEVIATION & CHART
+1. Run `scripts/grafana_metrics.py analyze` for region R (see "GENERIC DEVIATION & CHART
    GENERATION" below) — it fetches every `status: active` metric, applies
    floor-bypass then the statistical rule, and emits ready-to-embed HTML
    (reference scalar, finding bullets, chart `<ac:image>` tags for non-STATE
@@ -199,11 +221,11 @@ For each region R (scoped to `role="edgerouter", region="R"`):
 
 > **IMPORTANT**: See `references/metric-analysis-engine.md` for the single source of truth on how the script fetches data, computes deviations dynamically (RATE vs RESOURCE vs STATE), applies floor-bypass, and generates charts.
 
-**CRITICAL**: You MUST use the `bash` tool to execute `scripts/grafana_analyzer.py` for each region. The script handles fetching data, detecting deviations, generating PNG charts (overview + zoom, STATE metrics excluded), and outputting the exact HTML snippet.
+**CRITICAL**: You MUST use the `bash` tool to execute `scripts/grafana_metrics.py analyze` for each region. The script handles fetching data, detecting deviations, generating PNG charts (overview + zoom, STATE metrics excluded), and outputting the exact HTML snippet.
 
 The script takes **epoch milliseconds**, not dates — convert first (e.g. `date -j -f "%Y-%m-%dT%H:%M:%S" "2026-06-10T00:00:00" +%s000`).
 
-Example: `python3 scripts/grafana_analyzer.py /path/to/xcc_metrics.yaml 1781049600000 1782691199000 eu-south-1`
+Example: `python3 scripts/grafana_metrics.py analyze /path/to/xcc_metrics.yaml 1781049600000 1782691199000 eu-south-1`
 
 Your job is to run this script for each region and place its output inside the correct expandable block. Do not second-guess the math or write manual metric bullets.
 
@@ -273,7 +295,7 @@ The section builder (`xcc-metrics.md`) must analyse ONLY what is registered here
 ## Metrics to analyse
 
 Full definitions (PromQL, deviation rule, floor, unit) live in
-`config/xcc_metrics.yaml` — that file is what `scripts/grafana_analyzer.py`
+`config/xcc_metrics.yaml` — that file is what `scripts/grafana_metrics.py analyze`
 actually reads; this table is a human-readable index only.
 
 | Metric | Description | Status |

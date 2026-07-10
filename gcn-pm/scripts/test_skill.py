@@ -13,10 +13,13 @@ Regions only affect xcc-metrics / rtpengine-metrics.
 --no-publish: build the HTML locally (output/section_*.html + page_full.html)
 but skip the Confluence upload/PUT.
 
-Data access: Grafana via grafana_analyzer.py (mcp-remote), Kibana via
-fetch_sbc_data.py (plain HTTP; session cookie from kibana_auth.py — run
-`kibana_auth.py refresh` first if expired). The On-Call Alarms screenshot
-needs a live browser and is rendered as the documented warning fallback here.
+Data access: Grafana via `grafana_metrics.py analyze` (plain HTTP; session
+cookie from `grafana_metrics.py refresh`), Kibana via `kibana_metrics.py
+fetch`/`analyze` (plain HTTP; session cookie from `kibana_metrics.py
+refresh`) — run `grafana_metrics.py refresh` / `kibana_metrics.py refresh`
+first if either session is expired. The On-Call
+Alarms screenshot needs a live browser and is rendered as the documented
+warning fallback here.
 """
 import glob
 import json
@@ -94,7 +97,7 @@ def expand(title, body):
 
 
 def md_to_html(md):
-    """Convert sbc_analyzer's markdown output (### headings + 2-col tables) to storage HTML."""
+    """Convert kibana_metrics.py analyze's markdown output (### headings + 2-col tables) to storage HTML."""
     out, rows = [], []
 
     def flush():
@@ -134,7 +137,7 @@ def grafana_section(config_yaml, heading, start, end, region_filter, out_file, o
                 "<p><em>Not analysed in this run (region filter active).</em></p>"))
             continue
         print(f"  {heading}: analysing {token}...")
-        html = run([sys.executable, os.path.join(SCRIPTS, "grafana_analyzer.py"),
+        html = run([sys.executable, os.path.join(SCRIPTS, "grafana_metrics.py"), "analyze",
                     os.path.join(SKILL_DIR, "config", config_yaml),
                     str(start_ms), str(end_ms), token])
         parts.append(expand(display, html.strip()))
@@ -143,15 +146,15 @@ def grafana_section(config_yaml, heading, start, end, region_filter, out_file, o
 
 def sbc_section(start, end, outdir):
     print("  sbc-metrics: fetching Kibana data (plain HTTP)...")
-    run([sys.executable, os.path.join(SCRIPTS, "fetch_sbc_data.py"), start, end, "all"])
+    run([sys.executable, os.path.join(SCRIPTS, "kibana_metrics.py"), "fetch", start, end, "all"])
 
     with open(os.path.join(SKILL_DIR, "tmp", "sbc_a1a3.json")) as f:
         total = json.load(f)["hits"]["total"]
         total = total["value"] if isinstance(total, dict) else total
 
-    a1a3_md = run([sys.executable, os.path.join(SCRIPTS, "sbc_analyzer.py"),
+    a1a3_md = run([sys.executable, os.path.join(SCRIPTS, "kibana_metrics.py"), "analyze",
                    "a1-a3", "tmp/sbc_a1a3.json"])
-    b1_html = run([sys.executable, os.path.join(SCRIPTS, "sbc_analyzer.py"),
+    b1_html = run([sys.executable, os.path.join(SCRIPTS, "kibana_metrics.py"), "analyze",
                    "b1", "tmp/sbc_b1.json"])
 
     dash = ("https://kibana-logging.svc.talkdeskapp.com/app/dashboards#/view/"
@@ -168,7 +171,7 @@ def sbc_section(start, end, outdir):
         parts.append(f"<h2>{ribbon}</h2>")
         for sub_region, sbc in sbcs:
             print(f"  sbc-metrics: chart {sbc}...")
-            img_tag = run([sys.executable, os.path.join(SCRIPTS, "sbc_analyzer.py"),
+            img_tag = run([sys.executable, os.path.join(SCRIPTS, "kibana_metrics.py"), "analyze",
                            "b2", sbc, f"tmp/sbc_b2_{sbc}.json"])
             parts.append(expand(sub_region, img_tag.strip()))
     _write(outdir, "section_sbc.html", "".join(parts))
