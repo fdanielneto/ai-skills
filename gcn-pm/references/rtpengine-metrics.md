@@ -97,7 +97,9 @@ For each region R:
 
 **CRITICAL**: You MUST use the `bash` tool to execute `scripts/grafana_analyzer.py` for each region, passing the `rtp_metrics.yaml` config. The script handles fetching data, detecting deviations, generating PNG charts (overview + zoom, STATE metrics excluded), and outputting the exact HTML snippet.
 
-Example: `python3 scripts/grafana_analyzer.py /path/to/rtp_metrics.yaml 2026-06-10 2026-06-28 eu-south-1`
+The script takes **epoch milliseconds**, not dates — convert first (e.g. `date -j -f "%Y-%m-%dT%H:%M:%S" "2026-06-10T00:00:00" +%s000`).
+
+Example: `python3 scripts/grafana_analyzer.py /path/to/rtp_metrics.yaml 1781049600000 1782691199000 eu-south-1`
 
 Your job is to run this script for each region and place its output inside the correct expandable block. Do not second-guess the math or write manual metric bullets.
 
