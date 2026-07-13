@@ -104,7 +104,7 @@ Case-insensitive; `-`/`_` interchangeable.
 | `sbc-metrics`         | `scripts/generate_sbc.py`           | sbc_metrics, sbc, calls            |
 | `all`                 | (all of the above)                  | full, page                         |
 
-`on-call` also writes `output/section_events_tracking.html` (Events Tracking
+`on-call` also writes `tmp/section_events_tracking.html` (Events Tracking
 has no reference file/tokens of its own — it rides with On-Call).
 
 Unknown token → list the valid tokens and ask.
@@ -135,10 +135,13 @@ of THAT run; the page is wiped and rebuilt from scratch each time. Canonical
 section order: On-Call → XCC Metrics → RTP Engine Metrics → SBC Metrics →
 Events Tracking.
 
-1. **Clear stale output** (every run, before dispatching anything):
+1. **Clear stale local files** (every run, before dispatching anything —
+   covers leftovers from a previous run that failed before its own cleanup):
    ```
-   rm -f gcn-pm/output/section_*.html gcn-pm/output/page_full.html
+   rm -rf gcn-pm/tmp/*
    ```
+   This never touches `gcn-pm/.auth/` (session cookies + Playwright profile)
+   — that's a sibling directory, not under `tmp/`.
 2. **Run each requested section's generator** (all 4 for a full run, fewer
    for a block run):
 
@@ -163,12 +166,23 @@ Events Tracking.
    python3 gcn-pm/scripts/confluence_publish.py <start> <end>
    ```
    This assembles the header table + Table of Contents + whichever
-   `output/section_*.html` exist (canonical order), uploads referenced PNG
+   `tmp/section_*.html` exist (canonical order), uploads referenced PNG
    attachments, PUTs the page, and runs the post-publish verification gate.
    Non-zero exit = publish or verification failed — report the exact error
    text to the user, do not retry.
 
-4. **Run exactly once per invocation.** Never re-dispatch generators or
+4. **Clean up local files** (only if step 3 exited 0 — publish + verification
+   both succeeded):
+   ```
+   rm -rf gcn-pm/tmp/*
+   ```
+   This removes every locally-created working file from this run (raw JSON,
+   assembled section HTML, `page_full.html`, chart PNGs) now that they've
+   been uploaded/published. `gcn-pm/.auth/` is untouched (sibling directory).
+   If step 3 failed (non-zero exit), **skip this step** — leave `gcn-pm/tmp/`
+   as-is so the failed run can be inspected for debugging.
+
+5. **Run exactly once per invocation.** Never re-dispatch generators or
    re-attempt the publish within the same `/gcn-pm` call, even on a
    documented-fallback outcome or a verification failure. If the user wants
    another attempt, they invoke `/gcn-pm` again.

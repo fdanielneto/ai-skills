@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the XCC Metrics (Kamailio) section: output/section_xcc.html.
+"""Generate the XCC Metrics (Kamailio) section: tmp/section_xcc.html.
 
 Usage:
     generate_xcc.py <sprint_start YYYY-MM-DD> <sprint_end YYYY-MM-DD> \\
@@ -182,7 +182,7 @@ def per_region_blocks(config_yaml, start, end, region_filter):
 
 def main():
     argv = list(sys.argv[1:])
-    outdir = os.path.join(SKILL_DIR, "output")
+    outdir = os.path.join(SKILL_DIR, "tmp")
     if "--out" in argv:
         i = argv.index("--out")
         outdir = os.path.abspath(argv[i + 1])

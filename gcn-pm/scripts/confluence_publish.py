@@ -5,9 +5,9 @@ Usage:
     confluence_publish.py <sprint_start> <sprint_end> [--message "..."] \\
         [--out DIR] [--no-publish]
 
-Reads whichever of output/section_{oncall,xcc,rtpengine,sbc,events_tracking}.html
-exist under --out (default gcn-pm/output), assembles the header table + Table
-of Contents + sections in canonical order into output/page_full.html, uploads
+Reads whichever of tmp/section_{oncall,xcc,rtpengine,sbc,events_tracking}.html
+exist under --out (default gcn-pm/tmp), assembles the header table + Table
+of Contents + sections in canonical order into tmp/page_full.html, uploads
 any referenced PNG attachments, PUTs the full body to the fixed GCN PM Auto
 Test page, and runs the post-publish verification gate.
 
@@ -134,7 +134,7 @@ def assemble(start, end, outdir):
 def upload_attachments(page_html_path):
     with open(page_html_path) as f:
         referenced = set(re.findall(r'ri:filename="([^"]+)"', f.read()))
-    pngs = [p for p in glob.glob(os.path.join(SKILL_DIR, "output", "*.png"))
+    pngs = [p for p in glob.glob(os.path.join(SKILL_DIR, "tmp", "*.png"))
             if os.path.basename(p) in referenced]
     if not pngs:
         return
@@ -166,7 +166,7 @@ def upload_attachments(page_html_path):
 
 def main():
     argv = list(sys.argv[1:])
-    outdir = os.path.join(SKILL_DIR, "output")
+    outdir = os.path.join(SKILL_DIR, "tmp")
     if "--out" in argv:
         i = argv.index("--out")
         outdir = os.path.abspath(argv[i + 1])

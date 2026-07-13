@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the SBC Metrics section (Executive Summary + Detailed data):
-output/section_sbc.html.
+tmp/section_sbc.html.
 
 Usage:
     generate_sbc.py <sprint_start YYYY-MM-DD> <sprint_end YYYY-MM-DD> [--out DIR]
@@ -91,7 +91,7 @@ def md_to_html(md):
 
 def main():
     argv = list(sys.argv[1:])
-    outdir = os.path.join(SKILL_DIR, "output")
+    outdir = os.path.join(SKILL_DIR, "tmp")
     if "--out" in argv:
         i = argv.index("--out")
         outdir = os.path.abspath(argv[i + 1])

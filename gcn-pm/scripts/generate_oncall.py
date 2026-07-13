@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the On-Call section (Status Review, On-Call Alarms, Post-Mortem)
-plus Events Tracking: output/section_oncall.html, output/section_events_tracking.html.
+plus Events Tracking: tmp/section_oncall.html, tmp/section_events_tracking.html.
 
 Usage:
     generate_oncall.py <sprint_start YYYY-MM-DD> <sprint_end YYYY-MM-DD> [--out DIR]
@@ -245,7 +245,7 @@ def oncall_section(start, end, outdir):
 
 def main():
     argv = list(sys.argv[1:])
-    outdir = os.path.join(SKILL_DIR, "output")
+    outdir = os.path.join(SKILL_DIR, "tmp")
     if "--out" in argv:
         i = argv.index("--out")
         outdir = os.path.abspath(argv[i + 1])

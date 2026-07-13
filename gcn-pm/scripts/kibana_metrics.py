@@ -44,7 +44,6 @@ AUTH_DIR = os.path.join(SKILL_DIR, ".auth")
 PROFILE_DIR = os.path.join(AUTH_DIR, "profile")
 COOKIE_FILE = os.path.join(AUTH_DIR, "vouch_cookie.txt")
 TMP = os.path.join(SKILL_DIR, "tmp")
-OUTPUT_DIR = os.path.join(SKILL_DIR, "output")
 
 KIBANA_ORIGIN = "https://kibana-logging.svc.talkdeskapp.com"
 KIBANA_URL = KIBANA_ORIGIN + "/app/home"
@@ -367,8 +366,8 @@ def analyze_b2(raw_data, sbc_name):
         }]
     }
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUTPUT_DIR, f"sbc_timeline_{sbc_name}.png")
+    os.makedirs(TMP, exist_ok=True)
+    out_path = os.path.join(TMP, f"sbc_timeline_{sbc_name}.png")
     try:
         plot_helper.render_chart(f"Call Attempts — {sbc_name}", out_path, "Time", "calls", payload)
     except Exception as e:

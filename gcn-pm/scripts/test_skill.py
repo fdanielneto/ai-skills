@@ -11,7 +11,7 @@ Sections (same tokens/aliases as SKILL.md): on-call, xcc-metrics,
 rtpengine-metrics, sbc-metrics, all (default: all).
 Regions only affect xcc-metrics / rtpengine-metrics.
 
---no-publish: build output/section_*.html + page_full.html and verify
+--no-publish: build tmp/section_*.html + page_full.html and verify
 locally, skip the Confluence upload/PUT (passed through to
 confluence_publish.py --no-publish).
 """
@@ -62,7 +62,7 @@ def run(cmd, timeout=180):
 
 
 def parse_args(argv):
-    flags = {"publish": True, "outdir": os.path.join(SKILL_DIR, "output")}
+    flags = {"publish": True, "outdir": os.path.join(SKILL_DIR, "tmp")}
     if "--no-publish" in argv:
         argv.remove("--no-publish")
         flags["publish"] = False

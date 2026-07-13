@@ -40,7 +40,7 @@ SKILL_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file
 AUTH_DIR = os.path.join(SKILL_DIR, ".auth")
 PROFILE_DIR = os.path.join(AUTH_DIR, "profile")
 COOKIE_FILE = os.path.join(AUTH_DIR, "grafana_vouch_cookie.txt")
-OUTPUT_DIR = os.path.join(SKILL_DIR, "output")
+OUTPUT_DIR = os.path.join(SKILL_DIR, "tmp")
 
 GRAFANA_ORIGIN = "https://grafana-general.svc.talkdeskapp.com"
 GRAFANA_URL = GRAFANA_ORIGIN + "/"
