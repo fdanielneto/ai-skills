@@ -507,6 +507,85 @@ def resolve_panel_queries(client, grafana_url, metric_name, section):
         return []
 
 
+def _build_informational_table(client, queries, metric_name,
+                                start_epoch_ms, end_epoch_ms,
+                                region, section):
+    """data_view: table with no deviation/floor rules.
+
+    Collect every series returned by PromQL, group them by their
+    significant label-set (excluding infra-only labels like region,
+    __name__, job, stack, team), render a Confluence HTML table, and
+    detect label-value transitions (version, instance_type, etc.)
+    across the sprint.
+    """
+    print(f"  building informational table for {section} {metric_name}",
+          file=sys.stderr)
+
+    # collate: frozenset(label items) -> {labels, first_ts, last_ts, values}
+    groups = {}
+    for _sub_label, promql in queries:
+        res = query_prometheus(client, promql, start_epoch_ms,
+                               end_epoch_ms, region)
+        for series in res.get('data', {}).get('result', []):
+            points = series_points(series)
+            if not points:
+                continue
+            labels = series.get('metric', {})
+            sig = {k: v for k, v in labels.items()
+                   if k not in ('region', '__name__', 'job', 'stack', 'team')}
+            key = frozenset(sig.items())
+            first_ts = points[0][0]
+            last_ts = points[-1][0]
+            vals = [v for _, v in points]
+            avg_val = sum(vals) / len(vals)
+
+            if key not in groups:
+                groups[key] = {
+                    "labels": sig,
+                    "first_ts": first_ts,
+                    "last_ts": last_ts,
+                    "avg_val": avg_val,
+                }
+            else:
+                g = groups[key]
+                g["first_ts"] = min(g["first_ts"], first_ts)
+                g["last_ts"] = max(g["last_ts"], last_ts)
+                g["avg_val"] = (g["avg_val"] + avg_val) / 2
+
+    if not groups:
+        return None
+
+    sorted_entries = sorted(groups.values(), key=lambda e: e["first_ts"])
+    sample = sorted_entries[0]["labels"]
+    columns = list(sample.keys())
+
+    html = f"<p><strong>{metric_name}</strong></p>\n<table>"
+    html += "<tr>"
+    for col in columns:
+        html += f"<th>{col}</th>"
+    html += "<th>Avg Count</th><th>Active From</th><th>Active To</th></tr>\n"
+    for e in sorted_entries:
+        html += "<tr>"
+        for col in columns:
+            html += f"<td>{e['labels'].get(col, '')}</td>"
+        html += f"<td>{e['avg_val']:.0f}</td>"
+        html += f"<td>{format_timestamp(e['first_ts'])}</td>"
+        html += f"<td>{format_timestamp(e['last_ts'])}</td></tr>\n"
+    html += "</table>\n"
+
+    if len(sorted_entries) > 1:
+        transition_ts = format_timestamp(sorted_entries[0]["last_ts"])
+        first = sorted_entries[0]
+        for col in columns:
+            old_val = first["labels"].get(col, "")
+            new_val = sorted_entries[-1]["labels"].get(col, "")
+            if old_val != new_val:
+                html += (f'<p><strong>{col} changed</strong>: '
+                         f'{old_val} → {new_val} at {transition_ts}</p>\n')
+
+    return html
+
+
 def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                    region, section="xcc", defaults=None):
     """Analyze one metric and return HTML for its deviated series (or None).
@@ -565,6 +644,12 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
         print(f"  skipping {section} {metric_name}: no expr and no resolvable "
               f"Grafana panel", file=sys.stderr)
         return None
+
+    # Informational table: no deviation/floor rules, collect ALL series with labels
+    if data_view == 'table' and not deviation_rule and floor_value is None:
+        return _build_informational_table(client, queries, metric_name,
+                                          start_epoch_ms, end_epoch_ms,
+                                          region, section)
 
     groups = []  # (sub_label, [ {instance, peak, timestamp, points} ])
     for sub_label, promql in queries:

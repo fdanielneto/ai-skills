@@ -3,11 +3,9 @@ defaults:
 
 RTPEngine Alive:
   status: active
-  datasource: prometheus
   deviation: STATE
-  data_view: list
+  data_view: chart
   panel_id: 46
-  expr: sgn(rtpengine_uptime_seconds{region="$region",instance=~"rtpengine-edge-.*",service=~".*"})
   floor_value: 1
   floor_op: <
   description: "RTPEngine alive stats by RTPEngine instance (up/down status)"

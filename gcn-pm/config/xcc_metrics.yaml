@@ -3,25 +3,21 @@ defaults:
 
 "Version and Instance type":
   status: active
-  datasource: prometheus
+  data_view: table
   panel_id: 12
-  expr: count by (region, version, instance_type) (custom_metrics{role="edgerouter"})
   description: "XCC version and instance type by XCC instance"
 Kamailio Alive:
   status: active
-  datasource: prometheus
   deviation: STATE
-  data_view: list
+  data_view: chart_not_zoom
   panel_id: 22
-  expr: kamailio_alive{region="$region",role="edgerouter"}
   floor_value: 1
   floor_op: <
   description: "XCC alive stats by XCC instance (up/down status)"
 Kamailio Instance Restarts:
   status: active
-  datasource: prometheus
   deviation: STATE
-  data_view: list
+  data_view: chart
   expr: max_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[$__range]) - min_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[$__range])
   floor_value: 0
   floor_op: ">"
