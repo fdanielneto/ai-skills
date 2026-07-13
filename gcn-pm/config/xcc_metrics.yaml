@@ -17,8 +17,11 @@ Kamailio Alive:
 Kamailio Instance Restarts:
   status: active
   deviation: STATE
-  data_view: chart
-  expr: max_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[$__range]) - min_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[$__range])
+  data_view: chart_not_zoom
+  expr: present_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[5m])
   floor_value: 0
   floor_op: ">"
-  description: "Kamailio process restarts in the sprint (delta in process_start_time_seconds)"
+  description: "Kamailio instance up/down per instance (1=up, gap=down). Restart = an instance disappears while a new instance appears."
+  render:
+    min: 0
+    max: 1

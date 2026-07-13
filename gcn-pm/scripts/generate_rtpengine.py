@@ -14,6 +14,7 @@ Exit 0 with section_rtpengine.html written on success. Exit 1 on fatal error
 publish.
 """
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -73,6 +74,18 @@ def expand(title, body):
             f'<ac:rich-text-body>{body}</ac:rich-text-body></ac:structured-macro>')
 
 
+_PANEL_ERRORS_RE = re.compile(r'^<!-- PANEL_ERRORS:(\d+) -->')
+
+
+def region_title(display, html):
+    """Region display name, with a ⚠ + failure count if grafana_metrics.py
+    flagged 404/401 panel failures (see PANEL_ERRORS marker in analyze())."""
+    m = _PANEL_ERRORS_RE.match(html)
+    if not m:
+        return display
+    return f"{display} ⚠️ ({m.group(1)} metric(s) unavailable)"
+
+
 def main():
     argv = list(sys.argv[1:])
     outdir = os.path.join(SKILL_DIR, "tmp")
@@ -102,7 +115,8 @@ def main():
         html = run([sys.executable, os.path.join(SCRIPTS, "grafana_metrics.py"), "analyze",
                     os.path.join(SKILL_DIR, "config", "rtp_metrics.yaml"),
                     str(start_ms), str(end_ms), token])
-        parts.append(expand(display, html.strip()))
+        html = html.strip()
+        parts.append(expand(region_title(display, html), html))
     print("[RTPEngine] done", file=sys.stderr)
 
     path = os.path.join(outdir, "section_rtpengine.html")

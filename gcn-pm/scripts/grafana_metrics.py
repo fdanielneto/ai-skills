@@ -36,6 +36,15 @@ from urllib.request import Request, urlopen
 
 import plot_helper
 
+
+class GrafanaHTTPError(Exception):
+    """HTTP error from the Grafana proxy/dashboard API, carrying the actual
+    status code so callers can branch on 404/401 instead of string-matching."""
+    def __init__(self, status_code, message):
+        self.status_code = status_code
+        super().__init__(message)
+
+
 SKILL_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 AUTH_DIR = os.path.join(SKILL_DIR, ".auth")
 PROFILE_DIR = os.path.join(AUTH_DIR, "profile")
@@ -199,7 +208,7 @@ class GrafanaHttpClient:
             resp = urlopen(req, timeout=self.timeout)
             body = resp.read().decode()
         except HTTPError as e:
-            raise Exception(f"grafana: HTTP {e.code}: {e.read().decode()[:300]}")
+            raise GrafanaHTTPError(e.code, f"grafana: HTTP {e.code}: {e.read().decode()[:300]}")
 
         if body.lstrip().startswith("<"):
             raise RuntimeError(
@@ -420,11 +429,11 @@ def slice_zoom(points, center_ts, window_s=1800):
     return [(ts, v) for ts, v in points if center_ts - window_s <= ts <= center_ts + window_s]
 
 
-def generate_chart(title, out_path, unit, payload):
+def generate_chart(title, out_path, unit, payload, render_cfg=None):
     """Render via plot_helper.render_chart(). Never raises: a broken chart
     must not fail the metric."""
     try:
-        plot_helper.render_chart(title, out_path, "Time", unit, payload)
+        plot_helper.render_chart(title, out_path, "Time", unit, payload, render_cfg)
         return True
     except Exception as e:
         print(f"WARN: chart generation failed for '{title}': {e}", file=sys.stderr)
@@ -475,8 +484,14 @@ def extract_panel_queries(dashboard_json, panel_id):
     raise KeyError(f"panel {panel_id} not found")
 
 
-def extract_panel_unit(dashboard_json, panel_id):
-    """Extract the Y-axis unit from a Grafana panel's fieldConfig."""
+def extract_panel_field_config(dashboard_json, panel_id):
+    """Extract (unit, render_cfg) from a Grafana panel's fieldConfig, so the
+    generated PNG can mirror the panel's own chart type and axis config.
+
+    render_cfg = {"draw_style", "scale", "min", "max"}, pulled from
+    fieldConfig.defaults.custom.drawStyle/scaleDistribution and defaults.min/max.
+    Returns ("", {}) if the panel isn't found.
+    """
     def walk(items):
         for p in items:
             if p.get("type") == "row" and "panels" in p:
@@ -486,8 +501,16 @@ def extract_panel_unit(dashboard_json, panel_id):
     panels = dashboard_json.get("dashboard", {}).get("panels", [])
     for p in walk(panels):
         if p.get("id") == panel_id:
-            return p.get("fieldConfig", {}).get("defaults", {}).get("unit", "")
-    return ""
+            defaults = p.get("fieldConfig", {}).get("defaults", {})
+            custom = defaults.get("custom", {})
+            render_cfg = {
+                "draw_style": custom.get("drawStyle", "line"),
+                "scale": custom.get("scaleDistribution", {}).get("type", "linear"),
+                "min": defaults.get("min"),
+                "max": defaults.get("max"),
+            }
+            return defaults.get("unit", ""), render_cfg
+    return "", {}
 
 
 def resolve_panel_queries(client, grafana_url, metric_name, section):
@@ -587,7 +610,7 @@ def _build_informational_table(client, queries, metric_name,
 
 
 def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
-                   region, section="xcc", defaults=None):
+                   region, section="xcc", defaults=None, failures=None):
     """Analyze one metric and return HTML for its deviated series (or None).
 
     Query source, in priority order:
@@ -598,6 +621,13 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     Each query result is grouped under the metric's deviation rule; sub-query
     results are labelled by their key so the reader sees which dimension
     (e.g. "A — 4xx only") deviated.
+
+    `failures` (optional list, appended in place): 404/401/"panel not found"
+    errors resolving config['panel_id'] are recorded here instead of just
+    being logged, so the caller can render a visible warning — the data is
+    unreliable for that metric and deviation detection is skipped for it
+    (queries stays empty below, so this function returns None before the
+    detection loop ever runs).
     """
     print(f"  checking {section} {metric_name} deviation", file=sys.stderr)
     deviation_rule = config.get('deviation', '')
@@ -611,13 +641,19 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     panel_id = config.get('panel_id')
     dashboard_uid = config.get('dashboard') or (defaults or {}).get('dashboard', '')
 
-    # Extract Y-axis unit from Grafana panel metadata
+    # Extract Y-axis unit + render config (chart type/axis) from Grafana panel metadata
     unit = ''
+    render_cfg = {}
     if dashboard_uid and panel_id is not None:
         try:
-            unit = extract_panel_unit(client.get_dashboard(dashboard_uid), panel_id)
+            unit, render_cfg = extract_panel_field_config(client.get_dashboard(dashboard_uid), panel_id)
         except Exception:
             pass
+
+    # YAML-level render config overrides (min, max, draw_style)
+    render_overrides = cfg.get('render')
+    if render_overrides:
+        render_cfg = {**render_cfg, **render_overrides}
 
     # Build the list of (sub-label, promql) to run.
     queries = []
@@ -633,6 +669,18 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
             try:
                 dashboard = client.get_dashboard(dashboard_uid)
                 queries = extract_panel_queries(dashboard, panel_id)
+            except (GrafanaHTTPError, KeyError) as e:
+                reason = (f"HTTP {e.status_code}" if isinstance(e, GrafanaHTTPError)
+                          else "panel not found")
+                print(f"WARN: {section} {metric_name}: could not resolve panel queries "
+                      f"from panel {panel_id}: {e}", file=sys.stderr)
+                if failures is not None and (
+                        reason == "panel not found"
+                        or (isinstance(e, GrafanaHTTPError) and e.status_code in (404, 401))):
+                    failures.append({
+                        "metric": metric_name, "panel_id": panel_id,
+                        "dashboard": dashboard_uid, "reason": reason,
+                    })
             except Exception as e:
                 print(f"WARN: {section} {metric_name}: could not resolve panel queries "
                       f"from panel {panel_id}: {e}", file=sys.stderr)
@@ -715,7 +763,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
             "threshold": {"label": "Reference", "value": reference},
         }
         overview_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}.png")
-        if generate_chart(title, overview_path, unit, overview_payload):
+        if generate_chart(title, overview_path, unit, overview_payload, render_cfg):
             html_output += (
                 f'<ac:image ac:align="center" ac:width="950">'
                 f'<ri:attachment ri:filename="{os.path.basename(overview_path)}"/></ac:image>\n'
@@ -732,7 +780,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 if zoom_lines:
                     zoom_payload = {"lines": zoom_lines, "threshold": {"label": "Reference", "value": reference}}
                     zoom_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}_zoom.png")
-                    if generate_chart(f"{title} (zoom)", zoom_path, unit, zoom_payload):
+                    if generate_chart(f"{title} (zoom)", zoom_path, unit, zoom_payload, render_cfg):
                         html_output += (
                             f'<ac:image ac:align="center" ac:width="950">'
                             f'<ri:attachment ri:filename="{os.path.basename(zoom_path)}"/></ac:image>\n'
@@ -753,6 +801,7 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
 
     all_html = ""
     has_deviation = False
+    failures = []
 
     # One client/session per invocation, reused across all metrics.
     # A dead endpoint raises here (FAIL-FAST) instead of masking as "no deviation".
@@ -762,7 +811,7 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
         for metric_name, cfg in config.items():
             if isinstance(cfg, dict) and cfg.get('status') == 'active':
                 result = analyze_metric(client, metric_name, cfg, start_epoch_ms, end_epoch_ms,
-                                        region, section, defaults)
+                                        region, section, defaults, failures)
                 if result:
                     all_html += result
                     has_deviation = True
@@ -792,10 +841,30 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
 
     final_html = f'<p><a href="{grafana_link}">Grafana — {section} {region}</a></p>\n'
 
+    if failures:
+        final_html += (
+            '<ac:structured-macro ac:name="warning" ac:schema-version="1">'
+            '<ac:rich-text-body>'
+            f'<p><strong>⚠ {len(failures)} metric(s) could not be retrieved — '
+            'data unreliable, deviation detection skipped for these.</strong></p>'
+            '<table><tr><th>Metric</th><th>Panel ID</th><th>Dashboard</th><th>Reason</th></tr>'
+        )
+        for f in failures:
+            final_html += (
+                f'<tr><td>{f["metric"]}</td><td>{f["panel_id"]}</td>'
+                f'<td>{f["dashboard"]}</td><td>{f["reason"]}</td></tr>'
+            )
+        final_html += '</table></ac:rich-text-body></ac:structured-macro>\n'
+
     if has_deviation:
         final_html += all_html
+    elif failures:
+        final_html += "<p>No deviation detected in the metrics that could be retrieved.</p>\n"
     else:
         final_html += "<p>No deviation detected ✅</p>\n"
+
+    if failures:
+        final_html = f"<!-- PANEL_ERRORS:{len(failures)} -->\n" + final_html
 
     return final_html
 

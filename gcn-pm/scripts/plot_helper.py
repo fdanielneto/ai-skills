@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys
 import json
+import statistics
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 from datetime import datetime
 
@@ -9,11 +11,16 @@ from datetime import datetime
 # debugging: plot_helper.py <title> <output_png_path> <x_label> <y_label> '<json_data>'
 # json_data format: { "lines": [ { "label": "Instance 1", "points": [ {"x": "2026-06-15", "y": 123}, ... ] } ], "threshold": {"label": "Threshold", "value": 500} }
 
+_DEFAULT_BAR_WIDTH_DAYS = 1.0 / 24  # 1 hour, used when there's < 2 points to space bars from
 
-def render_chart(title, output_path, x_label, y_label, data):
-    plt.figure(figsize=(10, 4))
 
-    for line in data.get('lines', []):
+def render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
+    render_cfg = render_cfg or {}
+    draw_style = render_cfg.get('draw_style', 'line')
+    lines = data.get('lines', [])
+
+    parsed_lines = []
+    for line in lines:
         x_vals = []
         y_vals = []
         for pt in line.get('points', []):
@@ -28,26 +35,64 @@ def render_chart(title, output_path, x_label, y_label, data):
                 x_val = x_str  # fallback to string
             x_vals.append(x_val)
             y_vals.append(pt['y'])
-        plt.plot(x_vals, y_vals, linestyle='-', label=line.get('label'))
+        parsed_lines.append((line.get('label'), x_vals, y_vals))
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    if draw_style in ('bars', 'points'):
+        _render_bars(ax, parsed_lines)
+    else:
+        for label, x_vals, y_vals in parsed_lines:
+            ax.plot(x_vals, y_vals, linestyle='-', label=label)
 
     threshold = data.get('threshold')
     if threshold:
-        plt.axhline(y=threshold['value'], color='r', linestyle='--', label=threshold.get('label', 'Threshold'))
+        ax.axhline(y=threshold['value'], color='r', linestyle='--', label=threshold.get('label', 'Threshold'))
 
-    plt.title(title)
-    plt.xlabel(x_label)
-    plt.ylabel(y_label)
+    scale = render_cfg.get('scale')
+    if scale == 'log':
+        ax.set_yscale('log')
+    y_min, y_max = render_cfg.get('min'), render_cfg.get('max')
+    if y_min is not None or y_max is not None:
+        ax.set_ylim(bottom=y_min, top=y_max)
+
+    ax.set_title(title)
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
 
     # Auto-format dates on x-axis
-    plt.gcf().autofmt_xdate()
+    fig.autofmt_xdate()
 
-    if len(data.get('lines', [])) > 0 or threshold:
-        plt.legend()
+    if len(lines) > 0 or threshold:
+        ax.legend()
 
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    ax.grid(True, linestyle='--', alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def _render_bars(ax, parsed_lines):
+    """Grouped bar chart across parsed_lines = [(label, x_vals[datetime], y_vals), ...].
+
+    x_vals are converted to matplotlib date numbers so bar width/offset can be
+    computed numerically; ax.xaxis_date() restores date tick labels afterwards.
+    """
+    n = len(parsed_lines) or 1
+    all_nums = sorted({mdates.date2num(x) for _label, x_vals, _y in parsed_lines
+                        for x in x_vals if isinstance(x, datetime)})
+    if len(all_nums) > 1:
+        diffs = [b - a for a, b in zip(all_nums, all_nums[1:]) if b > a]
+        base_width = statistics.median(diffs) * 0.8 if diffs else _DEFAULT_BAR_WIDTH_DAYS
+    else:
+        base_width = _DEFAULT_BAR_WIDTH_DAYS
+
+    bar_width = base_width / n
+    for i, (label, x_vals, y_vals) in enumerate(parsed_lines):
+        x_nums = [mdates.date2num(x) if isinstance(x, datetime) else x for x in x_vals]
+        offset = (i - (n - 1) / 2.0) * bar_width
+        ax.bar([x + offset for x in x_nums], y_vals, width=bar_width, label=label)
+    ax.xaxis_date()
 
 
 def main():
