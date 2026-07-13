@@ -21,7 +21,8 @@ Kamailio Instance Restarts:
   expr: present_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[5m])
   floor_value: 0
   floor_op: ">"
-  description: "Kamailio instance up/down per instance (1=up, gap=down). Restart = an instance disappears while a new instance appears."
+  description: "Kamailio instance up/down per instance (1=up, 0=down). Terminate = a line drops 1->0; start = a line rises 0->1. Restart = one instance drops while another rises."
   render:
     min: 0
-    max: 1
+    max: 2
+    style: state
