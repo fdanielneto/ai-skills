@@ -429,6 +429,46 @@ def slice_zoom(points, center_ts, window_s=1800):
     return [(ts, v) for ts, v in points if center_ts - window_s <= ts <= center_ts + window_s]
 
 
+def fill_state_gaps(deviated):
+    """For up/down state series where 'down' is a gap (no sample), insert an
+    explicit 0.0 at every grid timestamp an instance is missing.
+
+    The grid is the union of all instances' timestamps in the group (the query
+    step grid). This turns down states into a 0 line so 1->0 (terminate) and
+    0->1 (start) transitions render as visible steps instead of vanishing.
+    Mutates and returns `deviated` with each dev['points'] gap-filled + sorted.
+    """
+    grid = sorted({ts for dev in deviated for ts, _ in dev['points']})
+    if not grid:
+        return deviated
+    for dev in deviated:
+        present = {ts: val for ts, val in dev['points']}
+        dev['points'] = [(ts, present.get(ts, 0.0)) for ts in grid]
+    return deviated
+
+
+def summarize_state_transitions(points):
+    """Count 0->1 (starts) and 1->0 (terminates) transitions in a gap-filled
+    up/down series. Returns (starts, terminates, first_change_ts).
+
+    An instance that is up for the whole window has no transition (its expected
+    initial up value is never counted as an event)."""
+    starts = terminates = 0
+    first_change_ts = None
+    prev_up = None
+    for ts, val in points:
+        up = val >= 0.5
+        if prev_up is not None and up != prev_up:
+            if up:
+                starts += 1
+            else:
+                terminates += 1
+            if first_change_ts is None:
+                first_change_ts = ts
+        prev_up = up
+    return starts, terminates, first_change_ts
+
+
 def generate_chart(title, out_path, unit, payload, render_cfg=None):
     """Render via plot_helper.render_chart(). Never raises: a broken chart
     must not fail the metric."""
@@ -654,6 +694,9 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     render_overrides = config.get('render')
     if render_overrides:
         render_cfg = {**render_cfg, **render_overrides}
+    # 'state' style = per-instance up/down chart (down gap-filled to 0, no
+    # reference line, transition-based reporting instead of peak framing).
+    chart_style = render_cfg.get('style')
 
     # Build the list of (sub-label, promql) to run.
     queries = []
@@ -736,21 +779,41 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     html_output = ""
     for sub_label, deviated in groups:
         title = metric_name if not sub_label else f"{metric_name} — {sub_label}"
-        reference = deviated[0]['peak']
-        html_output += f"<p><strong>{title} deviation detected</strong></p>\n"
-        html_output += f"<p>Reference = {reference:.2f} {unit}</p>\n"
-        if data_view == 'table':
-            html_output += '<table><tr><th>Instance</th><th>Value</th><th>Timestamp (UTC)</th></tr>\n'
-            for dev in deviated:
-                timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
-                html_output += f'<tr><td>{dev["instance"]}</td><td>{dev["peak"]:.2f} {unit}</td><td>{timestamp_str}</td></tr>\n'
-            html_output += '</table>\n'
-        else:
+
+        if chart_style == 'state':
+            # Up/down state: gap-fill down=0, report transitions (not a "peak").
+            fill_state_gaps(deviated)
+            html_output += f"<p><strong>{title} — instance up/down</strong></p>\n"
             html_output += '<ul>\n'
             for dev in deviated:
-                timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
-                html_output += f'  <li>{dev["instance"]}: peak {dev["peak"]:.2f} {unit} at {timestamp_str}</li>\n'
+                starts, terminates, change_ts = summarize_state_transitions(dev['points'])
+                if starts or terminates:
+                    ts_str = format_timestamp(change_ts) if change_ts else "N/A"
+                    parts = []
+                    if terminates:
+                        parts.append(f"{terminates} terminate(s)")
+                    if starts:
+                        parts.append(f"{starts} start(s)")
+                    html_output += f'  <li>{dev["instance"]}: {", ".join(parts)} (first change at {ts_str})</li>\n'
+                else:
+                    html_output += f'  <li>{dev["instance"]}: up (stable)</li>\n'
             html_output += '</ul>\n'
+        else:
+            reference = deviated[0]['peak']
+            html_output += f"<p><strong>{title} deviation detected</strong></p>\n"
+            html_output += f"<p>Reference = {reference:.2f} {unit}</p>\n"
+            if data_view == 'table':
+                html_output += '<table><tr><th>Instance</th><th>Value</th><th>Timestamp (UTC)</th></tr>\n'
+                for dev in deviated:
+                    timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
+                    html_output += f'<tr><td>{dev["instance"]}</td><td>{dev["peak"]:.2f} {unit}</td><td>{timestamp_str}</td></tr>\n'
+                html_output += '</table>\n'
+            else:
+                html_output += '<ul>\n'
+                for dev in deviated:
+                    timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
+                    html_output += f'  <li>{dev["instance"]}: peak {dev["peak"]:.2f} {unit} at {timestamp_str}</li>\n'
+                html_output += '</ul>\n'
 
         if data_view == 'list' or data_view == 'table':
             continue
@@ -760,8 +823,10 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
 
         overview_payload = {
             "lines": [{"label": dev["instance"], "points": format_points(dev["points"])} for dev in deviated],
-            "threshold": {"label": "Reference", "value": reference},
         }
+        if chart_style != 'state':
+            # State charts have no meaningful reference line (down=0, up=1).
+            overview_payload["threshold"] = {"label": "Reference", "value": reference}
         overview_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}.png")
         if generate_chart(title, overview_path, unit, overview_payload, render_cfg):
             html_output += (
@@ -778,7 +843,9 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                     if len(zoomed) >= 3:
                         zoom_lines.append({"label": dev["instance"], "points": format_points(zoomed)})
                 if zoom_lines:
-                    zoom_payload = {"lines": zoom_lines, "threshold": {"label": "Reference", "value": reference}}
+                    zoom_payload = {"lines": zoom_lines}
+                    if chart_style != 'state':
+                        zoom_payload["threshold"] = {"label": "Reference", "value": reference}
                     zoom_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}_zoom.png")
                     if generate_chart(f"{title} (zoom)", zoom_path, unit, zoom_payload, render_cfg):
                         html_output += (
