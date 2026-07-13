@@ -122,10 +122,18 @@ def refresh():
     os.makedirs(PROFILE_DIR, exist_ok=True)
     os.chmod(AUTH_DIR, 0o700)
     if _try_session(headless=True):
-        return
+        try:
+            GrafanaHttpClient()
+            return
+        except Exception:
+            print("Saved cookie invalid for API calls, retrying with visible browser...", file=sys.stderr)
     print("Headless session expired/absent — opening browser for login.")
     if not _try_session(headless=False):
         sys.exit("Login did not complete; no Vouch cookie captured.")
+    try:
+        GrafanaHttpClient()
+    except Exception as e:
+        sys.exit(f"Login completed but API validation failed: {e}")
 
 
 # ==================== HTTP client ====================
@@ -185,6 +193,7 @@ class GrafanaHttpClient:
         req = Request(url, method="GET")
         req.add_header("Accept", "application/json")
         req.add_header("Cookie", cookie_header())
+        req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
         try:
             resp = urlopen(req, timeout=self.timeout)

@@ -4,6 +4,7 @@ plus Events Tracking: output/section_oncall.html, output/section_events_tracking
 
 Usage:
     generate_oncall.py <sprint_start YYYY-MM-DD> <sprint_end YYYY-MM-DD> [--out DIR]
+    generate_oncall.py refresh
 
 On-Call Alarms uses a real Playwright browser (the `playwright` package
 directly — not the MCP tool, which only Claude subagents can call) against
@@ -15,12 +16,17 @@ failure or timeout along that path falls back to the warning panel below
 ("Fallback — Playwright MCP unavailable") — this is a successful, expected
 outcome, not a section failure.
 
+The `refresh` subcommand renews the Atlassian SSO session in the persistent
+profile (headless — or opens a visible browser if the session is expired).
+
 Exit 0 with both files written (Playwright success or fallback both count).
 Exit 1 only on a fatal error (fatal I/O error) — should not normally happen,
 this section has no external auth dependency besides the browser.
 """
 import os
+import stat
 import sys
+import time
 import uuid
 from datetime import datetime
 
@@ -77,6 +83,56 @@ FILTER_JS = """() => {{
 }}"""
 
 
+def _wait_for_auth(page, timeout_ms=30000):
+    """Poll up to timeout_ms for the URL to land on jira/ops/alerts."""
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        page.wait_for_timeout(5000)
+        if "jira/ops/alerts" in page.url:
+            return True
+    print(f"  last URL: {page.url[:120]}", file=sys.stderr)
+    return False
+
+
+def _ensure_session():
+    """Ensure a valid Atlassian SSO session exists in the persistent profile.
+    Tries headless first; falls back to a visible browser for interactive login.
+    Returns True if a session is established, False otherwise."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            PROFILE_DIR, channel="chrome", headless=True)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(ONCALL_NAV_URL, wait_until="domcontentloaded", timeout=60000)
+            if _wait_for_auth(page, 30000):
+                return True
+        finally:
+            context.close()
+
+        print("On-Call Alarms: headless session expired — "
+              "opening browser for Atlassian login.", file=sys.stderr)
+        context = p.chromium.launch_persistent_context(
+            PROFILE_DIR, channel="chrome", headless=False)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(ONCALL_NAV_URL, wait_until="domcontentloaded", timeout=60000)
+            print("Complete the Atlassian login in the browser window...", file=sys.stderr)
+            return _wait_for_auth(page, 180000)
+        finally:
+            context.close()
+
+
+def refresh():
+    """Refresh Atlassian SSO session in the persistent profile."""
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    os.chmod(AUTH_DIR, stat.S_IRWXU)
+    if _ensure_session():
+        print("OK: Atlassian session valid.")
+    else:
+        sys.exit("ERROR: Atlassian login did not complete.")
+
+
 def _capture_oncall_alarms(start, end, outdir):
     """Real Playwright capture of the On-Call Alarms table, filtered to the
     sprint window. Returns the screenshot filename on success, None on any
@@ -87,6 +143,10 @@ def _capture_oncall_alarms(start, end, outdir):
         print("WARN: playwright not installed — using fallback warning panel.", file=sys.stderr)
         return None
 
+    if not _ensure_session():
+        print("WARN: On-Call Alarms auth did not complete.", file=sys.stderr)
+        return None
+
     try:
         with sync_playwright() as p:
             context = p.chromium.launch_persistent_context(
@@ -94,21 +154,6 @@ def _capture_oncall_alarms(start, end, outdir):
             try:
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(ONCALL_NAV_URL, wait_until="domcontentloaded", timeout=60000)
-
-                # Auth guard: poll up to 30s for the URL to land on jira/ops/alerts.
-                # Always wait before the first check too — like grafana_metrics.py's
-                # _try_session, a client-side auth redirect can fire after
-                # domcontentloaded, so an immediate check can pass prematurely.
-                ok = False
-                for _ in range(6):
-                    page.wait_for_timeout(5000)
-                    if "jira/ops/alerts" in page.url:
-                        ok = True
-                        break
-                if not ok:
-                    print("WARN: On-Call Alarms auth did not complete in 30s.", file=sys.stderr)
-                    return None
-
                 page.wait_for_selector("table tbody", timeout=15000)
                 page.evaluate(FILTER_JS.format(start=start, end=end))
 
@@ -205,6 +250,11 @@ def main():
         i = argv.index("--out")
         outdir = os.path.abspath(argv[i + 1])
         del argv[i:i + 2]
+
+    if argv and argv[0] == "refresh":
+        refresh()
+        return
+
     if len(argv) < 2:
         sys.exit(__doc__)
     start, end = argv[0], argv[1]

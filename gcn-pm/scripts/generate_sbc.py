@@ -40,7 +40,7 @@ def run(cmd, timeout=120):
         sys.exit(f"ERROR: {' '.join(cmd)} timed out after {timeout}s")
     if p.poll() != 0:
         stderr = ''.join(stderr_lines)
-        if "401" in stderr and any("kibana_metrics.py" in part for part in cmd):
+        if any("kibana_metrics.py" in part for part in cmd) and ("401" in stderr or "session expired" in stderr):
             print("Kibana session expired, refreshing...", file=sys.stderr)
             ret = subprocess.run(
                 [sys.executable, os.path.join(SCRIPTS, "kibana_metrics.py"), "refresh"],

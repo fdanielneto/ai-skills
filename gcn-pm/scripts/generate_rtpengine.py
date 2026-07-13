@@ -25,8 +25,8 @@ sys.path.insert(0, SCRIPTS)
 from regions import REGIONS, REGION_TOKENS  # noqa: E402
 
 
-def run(cmd, timeout=120):
-    """Run a subprocess from the skill root; on Grafana 401 refresh once and retry."""
+def run(cmd, timeout=120, _retries=1):
+    """Run a subprocess from the skill root; on Grafana auth error refresh and retry."""
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          text=True, bufsize=1, cwd=SKILL_DIR,
                          env={**os.environ, "PYTHONUNBUFFERED": "1"})
@@ -42,7 +42,12 @@ def run(cmd, timeout=120):
         sys.exit(f"ERROR: {' '.join(cmd)} timed out after {timeout}s")
     if p.poll() != 0:
         stderr = ''.join(stderr_lines)
-        if "401" in stderr and any("grafana_metrics.py" in part for part in cmd):
+        err_lower = stderr.lower()
+        auth_errors = ("401", "unauthorized", "session expired", "sso", "login page")
+        if (any(kw in err_lower for kw in auth_errors)
+                and any("grafana_metrics.py" in part for part in cmd)):
+            if _retries <= 0:
+                sys.exit(f"ERROR: Grafana auth failed after retry:\n{stderr[-2000:]}")
             print("Grafana session expired, refreshing...", file=sys.stderr)
             ret = subprocess.run(
                 [sys.executable, os.path.join(SCRIPTS, "grafana_metrics.py"), "refresh"],
@@ -50,7 +55,7 @@ def run(cmd, timeout=120):
             if ret.returncode != 0:
                 sys.exit("ERROR: Grafana session refresh failed.")
             print("Grafana session refreshed, retrying...", file=sys.stderr)
-            return run(cmd, timeout=timeout)
+            return run(cmd, timeout=timeout, _retries=_retries - 1)
         sys.exit(f"ERROR: {' '.join(cmd)} failed:\n{stderr[-2000:]}")
     return stdout
 
