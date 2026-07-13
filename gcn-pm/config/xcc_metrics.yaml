@@ -1,19 +1,28 @@
-"Infra Details \u2014 version and instance type":
-  grafana: https://grafana-general.svc.talkdeskapp.com/goto/ffolpkul5sx6of?orgId=1
-  description: "XCC version and instance type \u2014 by XCC instance"
+defaults:
+  dashboard: xconnect_dashboard_v3
+
+"Version and Instance type":
   status: active
   datasource: prometheus
-  promql: count by (region, version, instance_type) (custom_metrics{role="edgerouter"})
-  deviation: "N/A \u2014 used for Host Details table only."
+  panel_id: 12
+  expr: count by (region, version, instance_type) (custom_metrics{role="edgerouter"})
+  description: "XCC version and instance type by XCC instance"
 Kamailio Alive:
-  grafana: https://grafana-general.svc.talkdeskapp.com/goto/ffolplog4lu68a?orgId=1
-  description: "XCC alive stats \u2014 by XCC instance (up/down status)"
   status: active
   datasource: prometheus
-  promql: up{region="$region",role="edgerouter",service="kamailio",stack="cpaas"}
-  deviation: flag any gap (value = 0 or series absent) lasting > 5 min.
-  floor: '0'
-  # values are strictly 0/1; "any point < 1" == "any point is 0" (down).
+  deviation: STATE
+  data_view: list
+  panel_id: 22
+  expr: kamailio_alive{region="$region",role="edgerouter"}
   floor_value: 1
-  floor_op: lt
-  unit: binary 0/1
+  floor_op: <
+  description: "XCC alive stats by XCC instance (up/down status)"
+Kamailio Instance Restarts:
+  status: active
+  datasource: prometheus
+  deviation: STATE
+  data_view: list
+  expr: max_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[$__range]) - min_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="kamailio"}[$__range])
+  floor_value: 0
+  floor_op: ">"
+  description: "Kamailio process restarts in the sprint (delta in process_start_time_seconds)"

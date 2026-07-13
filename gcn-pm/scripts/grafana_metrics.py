@@ -316,25 +316,12 @@ def calculate_mad(values):
     return median, mad
 
 
-def calculate_iqr(values):
-    """Calculate Q1, Q3, and IQR."""
-    if len(values) < 4:
-        return 0, 0, 0
-    sorted_vals = sorted(values)
-    n = len(sorted_vals)
-    q1_idx = n // 4
-    q3_idx = (3 * n) // 4
-    q1 = sorted_vals[q1_idx]
-    q3 = sorted_vals[q3_idx]
-    return q1, q3, q3 - q1
-
-
-def detect_deviation_resource(metric_name, values, threshold_pct=95):
+def detect_deviation_resource(values, threshold=80):
     """Resource metrics: flag if P95 exceeds threshold."""
     if not values:
         return False, 0
-    p95 = calculate_percentile(values, threshold_pct)
-    return p95 > 80, p95  # hardcoded 80% as example threshold
+    p95 = calculate_percentile(values, 95)
+    return p95 > threshold, p95
 
 
 def detect_deviation_spike(values):
@@ -347,52 +334,28 @@ def detect_deviation_spike(values):
     return peak_val > threshold, peak_val
 
 
-def detect_deviation_state(values):
-    """State metrics: flag a jump above median + 2*IQR, or sustained zeros (>50%)."""
-    if not values:
-        return False, 0
-    peak_val = max(values)
-    q1, q3, iqr = calculate_iqr(values)
-    median = sorted(values)[len(values) // 2]
-    if iqr > 0 and peak_val > median + (2 * iqr):
-        return True, peak_val
-    if sum(1 for v in values if v == 0) > len(values) * 0.5:
-        return True, 0
-    return False, peak_val
-
-
-def detect_deviation(deviation_rule, values):
-    """Dispatch on the metric's declared deviation type.
-
-    Free-text/baseline rules (no RESOURCE/RATE/STATE keyword) are not
-    auto-detected — they need a historical baseline we don't have here — so
-    they never false-flag; their data is still fetched and their Grafana link
-    published.
-    """
+def detect_deviation(deviation_rule, values, deviation_threshold=None):
     if not values:
         return False, 0
     if 'RESOURCE' in deviation_rule:
-        return detect_deviation_resource(None, values)
+        return detect_deviation_resource(values, deviation_threshold or 80)
     if 'RATE' in deviation_rule or 'Spike' in deviation_rule:
         return detect_deviation_spike(values)
-    if 'STATE' in deviation_rule:
-        return detect_deviation_state(values)
-    return False, max(values)
+    return False, max(values)  # STATE or free-text → floor only
 
 
 def check_floor(floor_value, floor_op, values):
-    """Floor bypass: flag immediately if any point crosses the metric's hard
-    floor, without waiting for the statistical rule. `floor_op` picks the
-    relevant extreme: gte/gt metrics are bad when a value is too HIGH (check
-    max), lt metrics (e.g. MOS) are bad when a value is too LOW (check min).
-    """
     if floor_value is None or not values:
         return False
-    if floor_op == 'lt':
+    if floor_op == '<':
         return min(values) < floor_value
-    if floor_op == 'gt':
+    if floor_op == '>':
         return max(values) > floor_value
-    return max(values) >= floor_value  # gte (default)
+    if floor_op == '<=':
+        return min(values) <= floor_value
+    if floor_op == '>=':
+        return max(values) >= floor_value
+    return max(values) >= floor_value  # >= (default)
 
 
 def series_label(metric):
@@ -425,6 +388,13 @@ def format_timestamp(epoch_s):
 def build_grafana_url(base_url, region, start_ms, end_ms):
     """Build parameterized Grafana URL."""
     return f"{base_url}&var-region={region}&from={start_ms}&to={end_ms}"
+
+
+def resolve_grafana_url(dashboard_uid, panel_id, region, start_ms, end_ms):
+    """Build a full Grafana panel URL from dashboard uid + panel id."""
+    params = urlencode({"orgId": 1, "viewPanel": f"panel-{panel_id}",
+                        "var-region": region, "from": start_ms, "to": end_ms})
+    return f"{GRAFANA_ORIGIN}/d/{dashboard_uid}/{dashboard_uid}?{params}"
 
 
 def slugify(text):
@@ -505,6 +475,21 @@ def extract_panel_queries(dashboard_json, panel_id):
     raise KeyError(f"panel {panel_id} not found")
 
 
+def extract_panel_unit(dashboard_json, panel_id):
+    """Extract the Y-axis unit from a Grafana panel's fieldConfig."""
+    def walk(items):
+        for p in items:
+            if p.get("type") == "row" and "panels" in p:
+                yield from walk(p["panels"])
+            else:
+                yield p
+    panels = dashboard_json.get("dashboard", {}).get("panels", [])
+    for p in walk(panels):
+        if p.get("id") == panel_id:
+            return p.get("fieldConfig", {}).get("defaults", {}).get("unit", "")
+    return ""
+
+
 def resolve_panel_queries(client, grafana_url, metric_name, section):
     """(sub_label, promql) pairs fetched live from the metric's Grafana panel,
     or [] if the URL isn't a resolvable direct dashboard link (goto short-link,
@@ -522,29 +507,42 @@ def resolve_panel_queries(client, grafana_url, metric_name, section):
         return []
 
 
-def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, region, section="xcc"):
+def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
+                   region, section="xcc", defaults=None):
     """Analyze one metric and return HTML for its deviated series (or None).
 
     Query source, in priority order:
-    1. an explicit `promql:` in the YAML (single query, or legacy A/B/C… keys
-       for configs not yet migrated) — used as-is, unchanged behaviour.
+    1. an explicit `expr:` in the YAML (single query, or legacy A/B/C… keys
+       for configs not yet migrated) — used as-is.
     2. otherwise, live sub-queries fetched from the metric's Grafana panel
-       (config['grafana'] must be a direct .../d/{uid}/...&viewPanel=N URL,
-       not a /goto/ short-link — see parse_grafana_url).
+       (config['panel_id'] + defaults['dashboard']).
     Each query result is grouped under the metric's deviation rule; sub-query
     results are labelled by their key so the reader sees which dimension
     (e.g. "A — 4xx only") deviated.
     """
     print(f"  checking {section} {metric_name} deviation", file=sys.stderr)
     deviation_rule = config.get('deviation', '')
-    unit = config.get('unit', '')
+    deviation_threshold = config.get('deviation_threshold')
     floor_value = config.get('floor_value')
-    floor_op = config.get('floor_op', 'gte')
+    floor_op = config.get('floor_op', '>=')
     is_state = 'STATE' in deviation_rule
+    data_view = config.get('data_view', 'chart')
+
+    # Resolve dashboard uid + panel
+    panel_id = config.get('panel_id')
+    dashboard_uid = config.get('dashboard') or (defaults or {}).get('dashboard', '')
+
+    # Extract Y-axis unit from Grafana panel metadata
+    unit = ''
+    if dashboard_uid and panel_id is not None:
+        try:
+            unit = extract_panel_unit(client.get_dashboard(dashboard_uid), panel_id)
+        except Exception:
+            pass
 
     # Build the list of (sub-label, promql) to run.
     queries = []
-    main = config.get('promql', '')
+    main = config.get('expr') or config.get('promql', '')
     if isinstance(main, str) and main.strip():
         queries.append((None, main))
     for key, val in config.items():
@@ -552,10 +550,19 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
             queries.append((key, val))
 
     if not queries:
-        queries = resolve_panel_queries(client, config.get('grafana', ''), metric_name, section)
+        if dashboard_uid and panel_id is not None:
+            try:
+                dashboard = client.get_dashboard(dashboard_uid)
+                queries = extract_panel_queries(dashboard, panel_id)
+            except Exception as e:
+                print(f"WARN: {section} {metric_name}: could not resolve panel queries "
+                      f"from panel {panel_id}: {e}", file=sys.stderr)
+        else:
+            queries = resolve_panel_queries(client, config.get('grafana', ''),
+                                            metric_name, section)
 
     if not queries:
-        print(f"  skipping {section} {metric_name}: no promql and no resolvable "
+        print(f"  skipping {section} {metric_name}: no expr and no resolvable "
               f"Grafana panel", file=sys.stderr)
         return None
 
@@ -569,9 +576,13 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
             if not points:
                 continue
             values = [v for _, v in points]
-            peak_ts, peak_val = max(points, key=lambda p: p[1])
-            # Floor bypass short-circuits the statistical rule (checked first).
-            flagged = check_floor(floor_value, floor_op, values) or detect_deviation(deviation_rule, values)[0]
+            # For floor_op that targets the lower end (<, ≤) use min to capture
+            # the actual violation; otherwise use max (traditional peak).
+            if floor_op in ('<', '<='):
+                peak_ts, peak_val = min(points, key=lambda p: p[1])
+            else:
+                peak_ts, peak_val = max(points, key=lambda p: p[1])
+            flagged = check_floor(floor_value, floor_op, values) or detect_deviation(deviation_rule, values, deviation_threshold)[0]
             if flagged:
                 deviated.append({
                     "instance": series_label(series.get('metric', {})),
@@ -595,15 +606,20 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
         reference = deviated[0]['peak']
         html_output += f"<p><strong>{title} deviation detected</strong></p>\n"
         html_output += f"<p>Reference = {reference:.2f} {unit}</p>\n"
-        html_output += "<ul>\n"
-        for dev in deviated:
-            timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
-            html_output += f"  <li>{dev['instance']}: peak {dev['peak']:.2f} {unit} at {timestamp_str}</li>\n"
-        html_output += "</ul>\n"
+        if data_view == 'table':
+            html_output += '<table><tr><th>Instance</th><th>Value</th><th>Timestamp (UTC)</th></tr>\n'
+            for dev in deviated:
+                timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
+                html_output += f'<tr><td>{dev["instance"]}</td><td>{dev["peak"]:.2f} {unit}</td><td>{timestamp_str}</td></tr>\n'
+            html_output += '</table>\n'
+        else:
+            html_output += '<ul>\n'
+            for dev in deviated:
+                timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
+                html_output += f'  <li>{dev["instance"]}: peak {dev["peak"]:.2f} {unit} at {timestamp_str}</li>\n'
+            html_output += '</ul>\n'
 
-        # STATE metrics never get a chart (blanket-skip; matches rtpengine-metrics.md's
-        # existing rule, resolves xcc-metrics.md's line 198 vs 240 contradiction).
-        if is_state:
+        if data_view == 'list' or data_view == 'table':
             continue
 
         group_slug = metric_slug if not sub_label else f"{metric_slug}_{slugify(sub_label)}"
@@ -620,21 +636,22 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
                 f'<ri:attachment ri:filename="{os.path.basename(overview_path)}"/></ac:image>\n'
             )
 
-            # Zoom chart: peak +/- 30 min around the primary (first) deviated series' event.
-            center_ts = deviated[0]['timestamp']
-            zoom_lines = []
-            for dev in deviated:
-                zoomed = slice_zoom(dev['points'], center_ts)
-                if len(zoomed) >= 3:
-                    zoom_lines.append({"label": dev["instance"], "points": format_points(zoomed)})
-            if zoom_lines:
-                zoom_payload = {"lines": zoom_lines, "threshold": {"label": "Reference", "value": reference}}
-                zoom_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}_zoom.png")
-                if generate_chart(f"{title} (zoom)", zoom_path, unit, zoom_payload):
-                    html_output += (
-                        f'<ac:image ac:align="center" ac:width="950">'
-                        f'<ri:attachment ri:filename="{os.path.basename(zoom_path)}"/></ac:image>\n'
-                    )
+            # Zoom chart: only for full chart mode.
+            if data_view == 'chart':
+                center_ts = deviated[0]['timestamp']
+                zoom_lines = []
+                for dev in deviated:
+                    zoomed = slice_zoom(dev['points'], center_ts)
+                    if len(zoomed) >= 3:
+                        zoom_lines.append({"label": dev["instance"], "points": format_points(zoomed)})
+                if zoom_lines:
+                    zoom_payload = {"lines": zoom_lines, "threshold": {"label": "Reference", "value": reference}}
+                    zoom_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}_zoom.png")
+                    if generate_chart(f"{title} (zoom)", zoom_path, unit, zoom_payload):
+                        html_output += (
+                            f'<ac:image ac:align="center" ac:width="950">'
+                            f'<ri:attachment ri:filename="{os.path.basename(zoom_path)}"/></ac:image>\n'
+                        )
 
     return html_output
 
@@ -647,6 +664,8 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
     with open(config_file, 'r') as f:
         config = yaml.safe_load(f)
 
+    defaults = config.pop('defaults', {}) if isinstance(config, dict) else {}
+
     all_html = ""
     has_deviation = False
 
@@ -656,23 +675,35 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
     client = GrafanaHttpClient()
     try:
         for metric_name, cfg in config.items():
-            if cfg.get('status') == 'active':
-                result = analyze_metric(client, metric_name, cfg, start_epoch_ms, end_epoch_ms, region, section)
+            if isinstance(cfg, dict) and cfg.get('status') == 'active':
+                result = analyze_metric(client, metric_name, cfg, start_epoch_ms, end_epoch_ms,
+                                        region, section, defaults)
                 if result:
                     all_html += result
                     has_deviation = True
     finally:
         client.close()
 
-    # Build final region block. Section + base link derive from the config
-    # (was hardcoded to RTPEngine, which mislabelled XCC runs).
+    # Build final region block. Section + base link derive from the config.
     section = "RTPEngine" if "rtp" in os.path.basename(config_file).lower() else "XCC"
-    grafana_base = next(
-        (cfg.get('grafana') for cfg in config.values()
-         if isinstance(cfg, dict) and cfg.get('status') == 'active' and cfg.get('grafana')),
-        "https://grafana-general.svc.talkdeskapp.com",
+    dashboard_uid = defaults.get('dashboard', '')
+    first_panel_id = next(
+        (c.get('panel_id') for c in config.values()
+         if isinstance(c, dict) and c.get('status') == 'active' and c.get('panel_id')),
+        None,
     )
-    grafana_link = build_grafana_url(grafana_base, region, start_epoch_ms, end_epoch_ms) if region else grafana_base
+    if dashboard_uid and first_panel_id is not None and region:
+        grafana_link = resolve_grafana_url(dashboard_uid, first_panel_id, region,
+                                           start_epoch_ms, end_epoch_ms)
+    elif dashboard_uid:
+        grafana_link = f"{GRAFANA_ORIGIN}/d/{dashboard_uid}/{dashboard_uid}"
+    else:
+        grafana_base = next(
+            (c.get('grafana') for c in config.values()
+             if isinstance(c, dict) and c.get('status') == 'active' and c.get('grafana')),
+            GRAFANA_ORIGIN,
+        )
+        grafana_link = build_grafana_url(grafana_base, region, start_epoch_ms, end_epoch_ms) if region else grafana_base
 
     final_html = f'<p><a href="{grafana_link}">Grafana — {section} {region}</a></p>\n'
 

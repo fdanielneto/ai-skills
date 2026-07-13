@@ -1,10 +1,13 @@
+defaults:
+  dashboard: xconnect_dashboard_v3
+
 RTPEngine Alive:
-  grafana: https://grafana-general.svc.talkdeskapp.com/goto/dfolpmd59gp34d?orgId=1
-  description: "RTPEngine alive stats \u2014 by RTPEngine instance (up/down via uptime\
-    \ seconds)"
-  purpose: verify all RTPEngine instances are up; flag any gap in aliveness
   status: active
   datasource: prometheus
-  promql: sgn(rtpengine_uptime_seconds{region="$region",instance=~"rtpengine-edge-.*",service=~".*"})
-  deviation: flag any gap (result = 0 or series absent) lasting > 1 min.
-  unit: binary 0/1
+  deviation: STATE
+  data_view: list
+  panel_id: 46
+  expr: sgn(rtpengine_uptime_seconds{region="$region",instance=~"rtpengine-edge-.*",service=~".*"})
+  floor_value: 1
+  floor_op: <
+  description: "RTPEngine alive stats by RTPEngine instance (up/down status)"
