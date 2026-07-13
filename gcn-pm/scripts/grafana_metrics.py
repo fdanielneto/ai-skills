@@ -783,10 +783,16 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
         if chart_style == 'state':
             # Up/down state: gap-fill down=0, report transitions (not a "peak").
             fill_state_gaps(deviated)
+            summaries = [(dev, *summarize_state_transitions(dev['points'])) for dev in deviated]
+            # No chart unless at least one instance actually went down (1->0).
+            # All-up-the-whole-sprint = no deviation, nothing to show.
+            if not any(terminates for _dev, _starts, terminates, _ts in summaries):
+                print(f"  no restart/terminate for {section} {metric_name}, skipping chart",
+                      file=sys.stderr)
+                continue
             html_output += f"<p><strong>{title} — instance up/down</strong></p>\n"
             html_output += '<ul>\n'
-            for dev in deviated:
-                starts, terminates, change_ts = summarize_state_transitions(dev['points'])
+            for dev, starts, terminates, change_ts in summaries:
                 if starts or terminates:
                     ts_str = format_timestamp(change_ts) if change_ts else "N/A"
                     parts = []
@@ -853,7 +859,9 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                             f'<ri:attachment ri:filename="{os.path.basename(zoom_path)}"/></ac:image>\n'
                         )
 
-    return html_output
+    # Empty when every group was skipped (e.g. state metric with no terminate):
+    # treat as no deviation so the caller renders nothing for this metric.
+    return html_output or None
 
 
 def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
