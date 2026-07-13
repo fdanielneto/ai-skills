@@ -50,6 +50,12 @@ PROXY_INSTANT_PATH = "/api/datasources/proxy/uid/{uid}/api/v1/query"
 # Sub-query keys look like "A — User", "B — 4xx only" (single letter, space, dash).
 SUBQUERY_KEY = re.compile(r'^[A-Z] [—\-]')
 
+# Direct dashboard URLs only: https://.../d/{uid}/{slug}?...&viewPanel=panel-N
+# (or viewPanel=N on older Grafana). /goto/ short-links are not resolved here —
+# they must be replaced with their canonical /d/{uid}/... form in the YAML first.
+_GRAFANA_DASHBOARD_RE = re.compile(r'/d/([^/]+)/')
+_GRAFANA_PANEL_RE = re.compile(r'viewPanel=(?:panel-)?(\d+)')
+
 
 # ==================== auth ====================
 
@@ -128,6 +134,7 @@ class GrafanaHttpClient:
     def __init__(self, origin=GRAFANA_ORIGIN, timeout=60):
         self.origin = origin
         self.timeout = timeout
+        self._dashboard_cache = {}
         self._verify_session()
 
     def _verify_session(self):
@@ -147,6 +154,13 @@ class GrafanaHttpClient:
             return int(t)
         raise TypeError(f"expected epoch seconds, got {t!r}")
 
+    def get_dashboard(self, uid):
+        """GET /api/dashboards/uid/{uid} → full dashboard JSON, cached per client
+        instance so multiple metrics pointing at the same dashboard only fetch once."""
+        if uid not in self._dashboard_cache:
+            self._dashboard_cache[uid] = self._get_json(f"/api/dashboards/uid/{uid}", {})
+        return self._dashboard_cache[uid]
+
     def query_prometheus(self, datasource_uid, expr, end_time, query_type="instant",
                           start_time=None, step=None):
         """Query Prometheus via Grafana's datasource proxy.
@@ -164,7 +178,9 @@ class GrafanaHttpClient:
         params = {"query": expr, "time": end_s, "dedup": "true", "max_source_resolution": "auto"}
         return {"data": self._get(PROXY_INSTANT_PATH.format(uid=datasource_uid), params)}
 
-    def _get(self, path, params):
+    def _get_json(self, path, params):
+        """Auth'd GET, SSO-page detection, JSON parse — shared by every endpoint
+        (Prometheus proxy, dashboard API), each of which validates its own shape."""
         url = f"{self.origin}{path}?{urlencode(params)}"
         req = Request(url, method="GET")
         req.add_header("Accept", "application/json")
@@ -174,7 +190,7 @@ class GrafanaHttpClient:
             resp = urlopen(req, timeout=self.timeout)
             body = resp.read().decode()
         except HTTPError as e:
-            raise Exception(f"grafana proxy: HTTP {e.code}: {e.read().decode()[:300]}")
+            raise Exception(f"grafana: HTTP {e.code}: {e.read().decode()[:300]}")
 
         if body.lstrip().startswith("<"):
             raise RuntimeError(
@@ -182,7 +198,10 @@ class GrafanaHttpClient:
                 "Run: python3 gcn-pm/scripts/grafana_metrics.py refresh"
             )
 
-        data = json.loads(body)
+        return json.loads(body)
+
+    def _get(self, path, params):
+        data = self._get_json(path, params)
         if data.get("status") != "success" or "result" not in data.get("data", {}):
             raise Exception(f"grafana proxy: unexpected response, keys={list(data)[:10]}")
         return data["data"]
@@ -433,12 +452,79 @@ def generate_chart(title, out_path, unit, payload):
         return False
 
 
+def parse_grafana_url(url):
+    """Extract (dashboard_uid, panel_id) from a direct Grafana dashboard URL
+    (.../d/{uid}/{slug}?...&viewPanel=panel-N or ...viewPanel=N).
+
+    Returns (uid, None) if there's no viewPanel, or (None, None) if this isn't
+    a direct dashboard URL at all (e.g. a /goto/ short-link — those are not
+    resolved here, see module docstring).
+    """
+    m = _GRAFANA_DASHBOARD_RE.search(url or '')
+    if not m:
+        return None, None
+    uid = m.group(1)
+    panel_m = _GRAFANA_PANEL_RE.search(url)
+    return uid, (int(panel_m.group(1)) if panel_m else None)
+
+
+def extract_panel_queries(dashboard_json, panel_id):
+    """[(sub_label, expr), ...] for the panel with id == panel_id, from its
+    targets[]. sub_label is "{refId} — {legendFormat or refId}", matching the
+    "A — 4xx only" convention SUBQUERY_KEY/analyze_metric already expect.
+
+    Recurses into row panels (panels[].panels[]) since Grafana nests panels
+    under collapsed rows. Raises KeyError if no panel with that id exists.
+    """
+    def walk(items):
+        for p in items:
+            if p.get("type") == "row" and "panels" in p:
+                yield from walk(p["panels"])
+            else:
+                yield p
+
+    panels = dashboard_json.get("dashboard", {}).get("panels", [])
+    for p in walk(panels):
+        if p.get("id") == panel_id:
+            queries = []
+            for t in p.get("targets", []):
+                if not t.get("expr"):
+                    continue
+                label = t.get("legendFormat") or t.get("refId", "?")
+                queries.append((f"{t.get('refId', '?')} — {label}", t["expr"]))
+            return queries
+    raise KeyError(f"panel {panel_id} not found")
+
+
+def resolve_panel_queries(client, grafana_url, metric_name, section):
+    """(sub_label, promql) pairs fetched live from the metric's Grafana panel,
+    or [] if the URL isn't a resolvable direct dashboard link (goto short-link,
+    no viewPanel, or the panel/dashboard lookup fails) — caller falls back to
+    an explicit `promql:` in that case, or skips the metric with a warning."""
+    uid, panel_id = parse_grafana_url(grafana_url)
+    if not uid or panel_id is None:
+        return []
+    try:
+        dashboard = client.get_dashboard(uid)
+        return extract_panel_queries(dashboard, panel_id)
+    except Exception as e:
+        print(f"WARN: {section} {metric_name}: could not resolve panel queries "
+              f"from {grafana_url}: {e}", file=sys.stderr)
+        return []
+
+
 def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, region, section="xcc"):
     """Analyze one metric and return HTML for its deviated series (or None).
 
-    Runs BOTH the direct `promql` field and every A/B/C… sub-query, each under
-    the metric's deviation rule. Sub-query results are labelled by their key so
-    the reader sees which dimension (e.g. "A — 4xx only") deviated.
+    Query source, in priority order:
+    1. an explicit `promql:` in the YAML (single query, or legacy A/B/C… keys
+       for configs not yet migrated) — used as-is, unchanged behaviour.
+    2. otherwise, live sub-queries fetched from the metric's Grafana panel
+       (config['grafana'] must be a direct .../d/{uid}/...&viewPanel=N URL,
+       not a /goto/ short-link — see parse_grafana_url).
+    Each query result is grouped under the metric's deviation rule; sub-query
+    results are labelled by their key so the reader sees which dimension
+    (e.g. "A — 4xx only") deviated.
     """
     print(f"  checking {section} {metric_name} deviation", file=sys.stderr)
     deviation_rule = config.get('deviation', '')
@@ -457,6 +543,11 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
             queries.append((key, val))
 
     if not queries:
+        queries = resolve_panel_queries(client, config.get('grafana', ''), metric_name, section)
+
+    if not queries:
+        print(f"  skipping {section} {metric_name}: no promql and no resolvable "
+              f"Grafana panel", file=sys.stderr)
         return None
 
     groups = []  # (sub_label, [ {instance, peak, timestamp, points} ])
@@ -470,7 +561,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms, re
                 continue
             values = [v for _, v in points]
             peak_ts, peak_val = max(points, key=lambda p: p[1])
-            # Floor bypass short-circuits the statistical rule (metric-analysis-engine.md §1).
+            # Floor bypass short-circuits the statistical rule (checked first).
             flagged = check_floor(floor_value, floor_op, values) or detect_deviation(deviation_rule, values)[0]
             if flagged:
                 deviated.append({

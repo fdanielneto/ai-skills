@@ -11,9 +11,9 @@ the shared Chrome persistent profile (gcn-pm/.auth/profile, same SSO
 identity as grafana_metrics.py/kibana_metrics.py `refresh`): navigate to
 Jira Ops Alerts, filter rows by the sprint window via a MutationObserver
 (handles lazy-loaded batches), screenshot, and embed as an attachment. Any
-failure or timeout along that path falls back to the documented warning
-panel (references/on-call.md, "Fallback — Playwright MCP unavailable") —
-this is a successful, expected outcome, not a section failure.
+failure or timeout along that path falls back to the warning panel below
+("Fallback — Playwright MCP unavailable") — this is a successful, expected
+outcome, not a section failure.
 
 Exit 0 with both files written (Playwright success or fallback both count).
 Exit 1 only on a fatal error (fatal I/O error) — should not normally happen,
@@ -35,8 +35,7 @@ ONCALL_NAV_URL = ("https://talkdesk.atlassian.net/jira/ops/alerts?view=list&"
                    "query=responders%3A%225b660e34-8c85-4c01-b3c5-c96d192300cf%22")
 
 # Re-applies the sprint-window row filter on every lazy-load batch (MutationObserver),
-# then waits for the row count to stabilise (1.5s stable, 8s max) — see
-# references/on-call.md "Step 2 — Filter by sprint dates (resilient lazy-load filter)".
+# then waits for the row count to stabilise (1.5s stable, 8s max).
 FILTER_JS = """() => {{
   const start = new Date('{start}T00:00:00');
   const end   = new Date('{end}T23:59:59');
@@ -137,7 +136,7 @@ def _info(items):
             f'<ac:rich-text-body><ul>{lis}</ul></ac:rich-text-body></ac:structured-macro>')
 
 
-# data-datasource values verbatim from references/on-call.md (entity-encoded JSON)
+# data-datasource values, entity-encoded JSON matching the live Jira/Confluence macro
 STATUS_DS = "{&quot;id&quot;: &quot;d8b75300-dfda-4519-b6cd-e49abbd50401&quot;, &quot;parameters&quot;: {&quot;cloudId&quot;: &quot;66f0204c-1684-409c-b644-8cac70022a54&quot;, &quot;jql&quot;: &quot;filter = \\&quot;production-meetings-interconnect\\&quot;&quot;}, &quot;views&quot;: [{&quot;type&quot;: &quot;table&quot;, &quot;properties&quot;: {&quot;columns&quot;: [{&quot;key&quot;: &quot;issuetype&quot;}, {&quot;key&quot;: &quot;key&quot;, &quot;width&quot;: 88}, {&quot;key&quot;: &quot;summary&quot;, &quot;width&quot;: 471}, {&quot;key&quot;: &quot;status&quot;}, {&quot;key&quot;: &quot;parent&quot;}, {&quot;key&quot;: &quot;customfield_10007&quot;, &quot;width&quot;: 109}, {&quot;key&quot;: &quot;assignee&quot;, &quot;width&quot;: 114}, {&quot;key&quot;: &quot;created&quot;}]}}]}"
 STATUS_HREF = "https://talkdesk.atlassian.net/issues/?jql=filter%20%3D%20%22production-meetings-interconnect%22"
 

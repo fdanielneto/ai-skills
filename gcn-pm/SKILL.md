@@ -24,12 +24,11 @@ This skill assembles a single Confluence page that mirrors the existing
 UCInterconnect "Production Meeting" pages, and publishes it into Fábio Neto's
 personal space.
 
-This file is a pure bash dispatcher — no subagents. Each section's data
-collection, HTML rendering, and fallback behavior lives entirely in its
-`scripts/generate_*.py`; this file only decides which of them to run and in
-what order, checks their exit codes, and calls `scripts/confluence_publish.py`
-once at the end. `references/help-card.md` is the only reference file still
-read, and only for `/gcn-pm help`.
+This file is a pure bash dispatcher — no subagents, no reference files. Each
+section's data collection, HTML rendering, and fallback behavior lives
+entirely in its `scripts/generate_*.py`; this file only decides which of
+them to run and in what order, checks their exit codes, and calls
+`scripts/confluence_publish.py` once at the end.
 
 ## ACTIVATION
 
@@ -39,8 +38,39 @@ This skill is manual. Only proceed when the user explicitly invokes it
 ## HELP MODE
 
 If the user runs `/gcn-pm help` (the single token `help` with no dates):
-return the contents of `references/help-card.md` verbatim (as a code block).
-Do NOT build or publish a page.
+return the following block verbatim (as a code block). Do NOT add
+commentary. Do NOT build or publish a page.
+
+```
+GCN Production Meeting builder — available runs
+
+Usage:
+  /gcn-pm <sprint-start YYYY-MM-DD> <sprint-end YYYY-MM-DD> [section ...] [region ...]
+  /gcn-pm help
+
+Section tokens (partial / block runs):
+  on-call            → Meeting Ops (Status Review, Alarms, Post-Mortem, Events)
+  xcc-metrics        → XCC Metrics (Kamailio)
+  rtpengine-metrics  → RTP Engine Metrics
+  sbc-metrics        → Executive Summary + Detailed data by Region (SBC/calls)
+  all                → Full page (all sections — same as omitting section tokens)
+
+Region tokens (filter for xcc-metrics / rtpengine-metrics):
+  eu-south-1        ap-southeast-1
+  eu-west-3         ap-southeast-2
+  us-east-1         sa-east-1
+  us-west-2         ca-central-1
+
+  Omit region tokens to analyse all regions.
+  Tokens are case-insensitive; - and _ are interchangeable.
+
+Examples:
+  /gcn-pm 2026-06-01 2026-06-14                           full page, all regions
+  /gcn-pm 2026-06-01 2026-06-14 xcc-metrics               XCC only, all regions
+  /gcn-pm 2026-06-01 2026-06-14 xcc-metrics eu-south-1    XCC, EU-South-1 only
+  /gcn-pm 2026-06-01 2026-06-14 on-call xcc-metrics        two sections only
+  /gcn-pm help                                             show this message
+```
 
 ## ARGUMENTS
 
