@@ -651,7 +651,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
             pass
 
     # YAML-level render config overrides (min, max, draw_style)
-    render_overrides = cfg.get('render')
+    render_overrides = config.get('render')
     if render_overrides:
         render_cfg = {**render_cfg, **render_overrides}
 
