@@ -41,6 +41,8 @@ def render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
 
     if draw_style in ('bars', 'points'):
         _render_bars(ax, parsed_lines)
+    elif render_cfg.get('style') == 'state':
+        _render_state(ax, parsed_lines)
     else:
         for label, x_vals, y_vals in parsed_lines:
             ax.plot(x_vals, y_vals, linestyle='-', label=label)
@@ -72,6 +74,25 @@ def render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
     plt.close(fig)
 
 
+_STATE_OFFSET = 0.01  # per-instance vertical spacing so overlapping up-lines stay perceptible
+
+
+def _render_state(ax, parsed_lines):
+    """Per-instance up/down (1=up, 0=down) step chart.
+
+    Each series gets a distinct color and a tiny downward vertical offset
+    (0.01 per series) so instances that are all up (flat at y=1) don't collapse
+    into a single line — they read as a small stack just below 1, while still
+    clearly being value=1. Rendered as steps so 1->0 / 0->1 transitions are sharp.
+    """
+    cmap = plt.get_cmap('tab10')
+    for i, (label, x_vals, y_vals) in enumerate(parsed_lines):
+        offset = i * _STATE_OFFSET
+        y_shifted = [y - offset for y in y_vals]
+        ax.plot(x_vals, y_shifted, drawstyle='steps-post', linewidth=1.5,
+                color=cmap(i % 10), label=label)
+
+
 def _render_bars(ax, parsed_lines):
     """Grouped bar chart across parsed_lines = [(label, x_vals[datetime], y_vals), ...].
 
@@ -101,7 +122,8 @@ def main():
     x_label = sys.argv[3]
     y_label = sys.argv[4]
     data = json.loads(sys.argv[5])
-    render_chart(title, output_path, x_label, y_label, data)
+    render_cfg = json.loads(sys.argv[6]) if len(sys.argv) > 6 else None
+    render_chart(title, output_path, x_label, y_label, data, render_cfg)
 
 
 if __name__ == "__main__":
