@@ -7,5 +7,41 @@ RTPEngine Alive:
   data_view: chart
   panel_id: 46
   floor_value: 1
-  floor_op: <
+  floor_op: "<"
   description: "RTPEngine alive stats by RTPEngine instance (up/down status)"
+RTPEngine CPU Stats:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 65
+  deviation_threshold: 300
+  floor_value: 60
+  floor_op: ">"
+  description: "RTPEngine CPU usage stats"
+RTPEngine System Load:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 66
+  deviation_threshold: 300
+  floor_value: 2.5
+  floor_op: ">"
+  description: "RTPEngine system load stats"
+RTPEngine Memory Usage:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 67
+  deviation_threshold: 300
+  floor_value: 60
+  floor_op: ">"
+  description: "RTPEngine memory usage stats"
+RTPEngine Network IO:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 63
+  deviation_threshold: 300
+  floor_value: 1000000
+  floor_op: ">"
+  description: "RTPEngine network IO stats"

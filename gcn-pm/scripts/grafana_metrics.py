@@ -683,6 +683,19 @@ def detect_deviation(deviation_rule, values, deviation_threshold=None):
     return False, max(values), 0  # STATE / RESOURCE / free-text → floor only
 
 
+def resolve_series_floor(config, sub_label, floor_value):
+    """Per-series floor override: a metric block's 'series_floor' map (keyed by
+    normalize_series_key(sub_label)) maps a view name directly to its
+    floor_value, since a single floor is often not viable across sub-series
+    with very different baseline scales (e.g. CPU Stats' iowait vs
+    system/guest). A view can disable its floor entirely with an explicit
+    'null'; a view absent from the map falls back to the metric-level
+    floor_value."""
+    series_floor = config.get('series_floor') or {}
+    key = normalize_series_key(sub_label)
+    return series_floor[key] if key in series_floor else floor_value
+
+
 def check_floor(floor_value, floor_op, values):
     if floor_value is None or not values:
         return False
@@ -739,6 +752,14 @@ def resolve_grafana_url(dashboard_uid, panel_id, region, start_ms, end_ms):
 def slugify(text):
     """lowercase, non-alphanumeric -> underscore (matches existing chart_<region>_<slug>.png convention)."""
     return re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+
+
+def normalize_series_key(sub_label):
+    """'B — System' -> 'system'; None/'' -> ''. Used to match a sub_label
+    against a metric's per-series 'series_overrides' YAML keys."""
+    if not sub_label:
+        return ''
+    return slugify(SUBQUERY_KEY.sub('', sub_label))
 
 
 def format_points(points):
@@ -1122,7 +1143,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
         resolved_queries.append((sub_label, promql))
 
     # Informational table: no deviation/floor rules, collect ALL series with labels
-    if data_view == 'table' and not deviation_rule and floor_value is None:
+    if data_view == 'table' and not deviation_rule and floor_value is None and not config.get('series_floor'):
         return _build_informational_table(client, resolved_queries, metric_name,
                                           start_epoch_ms, end_epoch_ms,
                                           region, section)
@@ -1131,6 +1152,12 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     for sub_label, promql in resolved_queries:
         print(f"  querying data to {section} {metric_name}", file=sys.stderr)
         res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
+
+        # Per-series floor override: a single floor is often not viable
+        # across sub-series with very different baseline scales (e.g. CPU
+        # Stats' iowait vs system/guest) — see 'series_floor' in the metric's
+        # YAML config.
+        eff_floor_value = resolve_series_floor(config, sub_label, floor_value)
 
         # SPIKE / RESOURCE-with-threshold: build a per-series seasonal baseline
         # model (day-of-week x hour-of-day median/MAD) from a local,
@@ -1173,7 +1200,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 peak_ts, peak_val = min(points, key=lambda p: p[1])
             else:
                 peak_ts, peak_val = max(points, key=lambda p: p[1])
-            flagged_floor = check_floor(floor_value, floor_op, values)
+            flagged_floor = check_floor(eff_floor_value, floor_op, values)
             if is_spike:
                 key = frozenset(series.get('metric', {}).items())
                 model = baseline_models.get(key) or pooled_model
@@ -1186,8 +1213,8 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 flagged_dev, _, dev_threshold = detect_deviation(deviation_rule, values, deviation_threshold)
             flagged = flagged_floor or flagged_dev
             # Reference threshold: the actual decision boundary that triggered.
-            if flagged_floor and floor_value is not None:
-                ref_threshold = floor_value
+            if flagged_floor and eff_floor_value is not None:
+                ref_threshold = eff_floor_value
             elif flagged_dev and dev_threshold:
                 ref_threshold = dev_threshold
             else:
