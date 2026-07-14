@@ -53,3 +53,48 @@ Error Rates (Spikes):
   floor_value: 4
   floor_op: >
   description: "XCC error rates (spikes)"
+CPU Stats:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 11
+  deviation_threshold: 300
+  floor_value: 10
+  floor_op: >
+  description: "XCC CPU stats"
+System Load:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 9
+  deviation_threshold: 300
+  floor_value: 2.5
+  floor_op: >
+  description: "XCC system load stats"
+CPU Usage per Process:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 14
+  deviation_threshold: 300
+  floor_value: 15
+  floor_op: >
+  description: "XCC CPU usage per process stats"
+Memory Usage per Process:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 16
+  deviation_threshold: 300
+  floor_value: 2.5
+  floor_op: >
+  description: "XCC memory usage per process stats"
+Memory Usage:
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 4
+  deviation_threshold: 300
+  floor_value: 60
+  floor_op: >
+  description: "XCC memory usage stats"

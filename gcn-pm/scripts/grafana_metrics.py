@@ -367,13 +367,17 @@ def calculate_mad(values):
     return median, mad
 
 
-def detect_deviation_resource(values, threshold=80):
-    """Resource metrics: flag if P95 exceeds threshold.
-    Returns (flagged, value_at_risk, decision_threshold)."""
-    if not values:
-        return False, 0, threshold
-    p95 = calculate_percentile(values, 95)
-    return p95 > threshold, p95, threshold
+def detect_deviation_baseline(peak_val, model, threshold_pct):
+    """RESOURCE with deviation_threshold: flag if peak > baseline_median × (1 + threshold_pct/100).
+    threshold_pct of 300 means 4× the median.
+    Returns (flagged, baseline_median, decision_boundary)."""
+    if model is None or threshold_pct is None:
+        return False, 0, 0
+    baseline_median = model.get("global", {}).get("median", 0)
+    if baseline_median <= 0:
+        return False, 0, 0
+    decision_boundary = baseline_median * (1 + threshold_pct / 100.0)
+    return peak_val > decision_boundary, baseline_median, decision_boundary
 
 
 def detect_deviation_spike(values):
@@ -667,16 +671,16 @@ def fetch_baseline_points_cached(client, cache_path, promql, baseline_start_ms, 
 
 
 def detect_deviation(deviation_rule, values, deviation_threshold=None):
-    """Returns (flagged, value_at_risk, decision_threshold)."""
+    """Returns (flagged, value_at_risk, decision_threshold).
+    SPIKE uses a statistical test on the values themselves.
+    All other types fall through to floor-only (caller handles RESOURCE
+    baseline detection separately when deviation_threshold is set)."""
     if not values:
         return False, 0, 0
-    # Case-insensitive so YAML tokens like 'SPIKE' match (configs use uppercase).
     rule = (deviation_rule or '').upper()
-    if 'RESOURCE' in rule:
-        return detect_deviation_resource(values, deviation_threshold or 80)
-    if 'RATE' in rule or 'SPIKE' in rule:
+    if 'SPIKE' in rule:
         return detect_deviation_spike(values)
-    return False, max(values), 0  # STATE or free-text → floor only
+    return False, max(values), 0  # STATE / RESOURCE / free-text → floor only
 
 
 def check_floor(floor_value, floor_op, values):
@@ -1016,6 +1020,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     floor_op = config.get('floor_op', '>=')
     is_state = 'STATE' in deviation_rule
     is_spike = 'SPIKE' in deviation_rule.upper()
+    is_resource = 'RESOURCE' in deviation_rule.upper() and deviation_threshold is not None
     baseline_weeks = config.get('baseline_weeks', BASELINE_WEEKS_DEFAULT)
     band_k = config.get('band_k', BAND_K_DEFAULT)
     baseline_start_ms = start_epoch_ms - baseline_weeks * 7 * 24 * 3600 * 1000
@@ -1127,12 +1132,14 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
         print(f"  querying data to {section} {metric_name}", file=sys.stderr)
         res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
 
-        # SPIKE metrics: build a per-series seasonal baseline model (day-of-week x
-        # hour-of-day median/MAD) from a local, incrementally-updated cache of
-        # baseline_weeks..now history, instead of the flat median+3*MAD test.
+        # SPIKE / RESOURCE-with-threshold: build a per-series seasonal baseline
+        # model (day-of-week x hour-of-day median/MAD) from a local,
+        # incrementally-updated cache of baseline_weeks..now history.
+        # SPIKE uses the full bucket model for seasonal bounds; RESOURCE uses
+        # the global median for a relative peak-over-baseline check.
         baseline_models = {}
         pooled_model = None
-        if is_spike:
+        if is_spike or is_resource:
             cache_path = _cache_path(section, metric_slug, region, sub_label)
             baseline_res = fetch_baseline_points_cached(
                 client, cache_path, promql, baseline_start_ms, baseline_end_ms, region,
@@ -1171,6 +1178,10 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 key = frozenset(series.get('metric', {}).items())
                 model = baseline_models.get(key) or pooled_model
                 flagged_dev, dev_threshold = detect_deviation_seasonal(peak_val, peak_ts, model, band_k)
+            elif is_resource:
+                key = frozenset(series.get('metric', {}).items())
+                model = baseline_models.get(key) or pooled_model
+                flagged_dev, _, dev_threshold = detect_deviation_baseline(peak_val, model, deviation_threshold)
             else:
                 flagged_dev, _, dev_threshold = detect_deviation(deviation_rule, values, deviation_threshold)
             flagged = flagged_floor or flagged_dev
