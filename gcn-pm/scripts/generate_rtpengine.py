@@ -3,7 +3,10 @@
 
 Usage:
     generate_rtpengine.py <sprint_start YYYY-MM-DD> <sprint_end YYYY-MM-DD> \\
-        [region ...] [--out DIR]
+        [region ...] [--metric slug[,slug...]] [--out DIR]
+
+--metric restricts analysis to the given metric slug(s) (metric name lowercased,
+non-alnum → '-', e.g. 'rtpengine-alive').
 
 Per-region deviation analysis via `grafana_metrics.py analyze` (P95/MAD/IQR +
 floor bypass, chart generation) against config/rtp_metrics.yaml. No Host
@@ -24,6 +27,7 @@ SKILL_DIR = os.path.normpath(os.path.join(SCRIPTS, ".."))
 sys.path.insert(0, SCRIPTS)
 
 from regions import REGIONS, REGION_TOKENS  # noqa: E402
+from grafana_metrics import load_metric_slugs  # noqa: E402
 
 
 def run(cmd, timeout=120, _retries=1):
@@ -93,6 +97,11 @@ def main():
         i = argv.index("--out")
         outdir = os.path.abspath(argv[i + 1])
         del argv[i:i + 2]
+    metric_filter = set()
+    if "--metric" in argv:
+        i = argv.index("--metric")
+        metric_filter = {s for s in argv[i + 1].split(",") if s}
+        del argv[i:i + 2]
     if len(argv) < 2:
         sys.exit(__doc__)
     start, end = argv[0], argv[1]
@@ -103,6 +112,12 @@ def main():
     if unknown:
         sys.exit(f"Unknown region token(s): {sorted(unknown)}\nValid: {sorted(REGION_TOKENS)}")
 
+    valid_slugs = load_metric_slugs(os.path.join(SKILL_DIR, "config", "rtp_metrics.yaml"))
+    unknown_metrics = metric_filter - valid_slugs.keys()
+    if unknown_metrics:
+        sys.exit(f"Unknown metric token(s): {sorted(unknown_metrics)}\n"
+                 f"Valid: {sorted(valid_slugs)}")
+
     os.makedirs(outdir, exist_ok=True)
     start_ms, end_ms = epoch_ms(start), epoch_ms(end, end_of_day=True)
     parts = ["<h1>RTP Engine Metrics</h1>"]
@@ -112,9 +127,12 @@ def main():
                 "<p><em>Not analysed in this run (region filter active).</em></p>"))
             continue
         print(f"[RTPEngine] {token}...", file=sys.stderr)
-        html = run([sys.executable, os.path.join(SCRIPTS, "grafana_metrics.py"), "analyze",
-                    os.path.join(SKILL_DIR, "config", "rtp_metrics.yaml"),
-                    str(start_ms), str(end_ms), token])
+        cmd = [sys.executable, os.path.join(SCRIPTS, "grafana_metrics.py"), "analyze",
+               os.path.join(SKILL_DIR, "config", "rtp_metrics.yaml"),
+               str(start_ms), str(end_ms), token]
+        if metric_filter:
+            cmd += ["--metric", ",".join(sorted(metric_filter))]
+        html = run(cmd)
         html = html.strip()
         parts.append(expand(region_title(display, html), html))
     print("[RTPEngine] done", file=sys.stderr)

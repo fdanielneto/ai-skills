@@ -1,11 +1,6 @@
 defaults:
   dashboard: xconnect_dashboard_v3
 
-"Version and Instance type":
-  status: active
-  data_view: table
-  panel_id: 12
-  description: "XCC version and instance type by XCC instance"
 Kamailio Alive:
   status: active
   deviation: STATE
@@ -26,3 +21,35 @@ Kamailio Instance Restarts:
     min: 0
     max: 2
     style: state
+Error Rates (Spikes) - By Instance:
+  status: active
+  deviation: SPIKE
+  data_view: chart
+  panel_id: 800
+  floor_value: 2
+  floor_op: >
+  description: "XCC error rates (spikes) by XCC instance"
+Custom Metrics Rates (Spikes) - By Instance:
+  status: active
+  deviation: SPIKE
+  data_view: chart
+  panel_id: 801
+  floor_value: 7
+  floor_op: >
+  description: "XCC custom metrics rates (spikes) by XCC instance"
+Custom Metrics Rates (Spikes):
+  status: active
+  deviation: SPIKE
+  data_view: chart
+  panel_id: 232
+  floor_value: 20
+  floor_op: >
+  description: "XCC custom metrics rates (spikes)"
+Error Rates (Spikes):
+  status: active
+  deviation: SPIKE
+  data_view: chart
+  panel_id: 231
+  floor_value: 4
+  floor_op: >
+  description: "XCC error rates (spikes)"

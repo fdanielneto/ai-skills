@@ -5,11 +5,18 @@ SKILL.md's bash dispatcher uses) and reports pass/fail per step.
 
 Usage:
     test_skill.py <sprint-start YYYY-MM-DD> <sprint-end YYYY-MM-DD> \\
-        [section ...] [region ...] [--no-publish] [--out DIR]
+        [section ...] [region ...] [metric-slug ...] [--no-publish] [--out DIR]
 
 Sections (same tokens/aliases as SKILL.md): on-call, xcc-metrics,
 rtpengine-metrics, sbc-metrics, all (default: all).
 Regions only affect xcc-metrics / rtpengine-metrics.
+
+Any token that is not a section or region is treated as a metric slug (the
+metric name lowercased, non-alnum → '-', e.g. 'error-rates-spikes'). Metric
+slugs only apply to xcc-metrics / rtpengine-metrics, so pair them with that
+section, e.g.:
+    test_skill.py 2026-07-02 2026-07-13 xcc-metrics eu-south-1 error-rates-spikes
+Invalid slugs are rejected by the generator, which lists the valid ones.
 
 --no-publish: build tmp/section_*.html + page_full.html and verify
 locally, skip the Confluence upload/PUT (passed through to
@@ -77,7 +84,7 @@ def parse_args(argv):
     for d in (start, end):
         datetime.strptime(d, "%Y-%m-%d")  # validate
 
-    sections, regions = set(), set()
+    sections, regions, metrics = set(), set(), set()
     for tok in argv[2:]:
         t = tok.lower().replace("_", "-")
         canonical = next((c for c, aliases in SECTION_ALIASES.items()
@@ -87,21 +94,24 @@ def parse_args(argv):
         elif t in REGION_TOKENS:
             regions.add(t)
         else:
-            sys.exit(f"Unknown token: {tok}\nSections: {list(SECTION_ALIASES)}\n"
-                     f"Regions: {sorted(REGION_TOKENS)}")
+            # Unknown token → treat as a metric slug; validated by the generator
+            # (which knows the YAML and lists valid slugs on mismatch). Only
+            # forwarded to xcc/rtpengine, so pair it with one of those sections.
+            metrics.add(t)
     if not sections or "all" in sections:
         sections = set(CANONICAL_ORDER)
-    return start, end, sections, regions, flags
+    return start, end, sections, regions, metrics, flags
 
 
 def main():
-    start, end, sections, regions, flags = parse_args(sys.argv[1:])
+    start, end, sections, regions, metrics, flags = parse_args(sys.argv[1:])
     outdir = flags["outdir"]
     os.makedirs(outdir, exist_ok=True)
     for stale in glob.glob(os.path.join(outdir, "section_*.html")) + \
             glob.glob(os.path.join(outdir, "page_full.html")):
         os.remove(stale)  # each run's page contains ONLY that run's sections
-    print(f"Run: {start}..{end} sections={sorted(sections)} regions={sorted(regions) or 'all'}")
+    print(f"Run: {start}..{end} sections={sorted(sections)} "
+          f"regions={sorted(regions) or 'all'} metrics={sorted(metrics) or 'all'}")
 
     for section in CANONICAL_ORDER:
         if section not in sections:
@@ -110,6 +120,10 @@ def main():
         cmd = [sys.executable, os.path.join(SCRIPTS, script), start, end, "--out", outdir]
         if takes_region:
             cmd += sorted(regions)
+            # --metric is only supported by the region-taking generators
+            # (xcc-metrics, rtpengine-metrics).
+            if metrics:
+                cmd += ["--metric", ",".join(sorted(metrics))]
         rc, _ = run(cmd)
         if rc != 0:
             sys.exit(f"FAIL: {script} exited {rc}")

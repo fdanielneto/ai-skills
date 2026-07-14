@@ -12,16 +12,22 @@ Subcommands:
                                  login otherwise.
   read                           Print the saved Cookie header value (non-zero
                                  exit if missing).
-  analyze <config_yaml> <start_epoch_ms> <end_epoch_ms> [region]
+  analyze <config_yaml> <start_epoch_ms> <end_epoch_ms> [region] [--metric slug[,slug...]] [--debug]
                                  Query every active metric in config_yaml over
                                  plain HTTP (Grafana's Prometheus datasource
-                                 proxy), detect deviations (P95/MAD/IQR + floor
-                                 bypass), render PNG charts, and print the
-                                 Confluence Storage HTML snippet.
+                                 proxy), detect deviations (P95/floor bypass,
+                                 or for SPIKE metrics a day-of-week x hour-of-day
+                                 seasonal baseline — see build_seasonal_baseline;
+                                 baseline history is cached incrementally under
+                                 gcn-pm/.baseline_cache/), render PNG charts, and
+                                 print the Confluence Storage HTML snippet.
+                                 --debug prints the bucket/threshold that gated
+                                 each flagged SPIKE series to stderr.
 
 Data-path code (analyze) must only ever call cookie_header() / `read` — never
 drive a browser or prompt for login itself; that's `refresh`'s job alone.
 """
+import hashlib
 import json
 import os
 import re
@@ -50,6 +56,17 @@ AUTH_DIR = os.path.join(SKILL_DIR, ".auth")
 PROFILE_DIR = os.path.join(AUTH_DIR, "profile")
 COOKIE_FILE = os.path.join(AUTH_DIR, "grafana_vouch_cookie.txt")
 OUTPUT_DIR = os.path.join(SKILL_DIR, "tmp")
+BASELINE_CACHE_DIR = os.path.join(SKILL_DIR, ".baseline_cache")
+
+# SPIKE seasonal baseline model defaults (see build_seasonal_baseline).
+BASELINE_WEEKS_DEFAULT = 8      # minimum history before a bucket is "trusted"
+MAX_BASELINE_WEEKS = 26         # cache prune cap (~6 months)
+BAND_K_DEFAULT = 4.0            # confidence-band multiplier on bucket MAD
+MIN_BUCKET_SAMPLES = 20         # below this, fall back to the series' global stats
+MAD_FLOOR_FRACTION = 0.10       # mad_eff floor: 10% of the expected level
+MAD_ABS_FLOOR = 0.05            # mad_eff floor: absolute minimum (metric units)
+
+DEBUG_SEASONAL = False          # set by `analyze --debug`; prints bucket stats for flagged SPIKE series
 
 GRAFANA_ORIGIN = "https://grafana-general.svc.talkdeskapp.com"
 GRAFANA_URL = GRAFANA_ORIGIN + "/"
@@ -255,6 +272,27 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
     if "$__range" in promql:
         promql = promql.replace("$__range", f"{end_s - start_s}s")
 
+    # Grafana interval macros: panels extracted via panel_id embed these in
+    # range-vectors (e.g. rate(...[$__rate_interval])). The datasource proxy does
+    # not expand them, so the literal '$' reaches Prometheus and fails parsing.
+    # Resolve them from `step`. Order matters: replace the more specific *_ms and
+    # rate_interval variants before $__interval, otherwise $__interval matches the
+    # shared prefix inside $__interval_ms / $__rate_interval.
+    #
+    # rate_interval is floored at 900s (not just 4*step): confirmed live against
+    # the Thanos-backed datasource that samples older than ~1 week (outside raw
+    # retention) are spaced further apart than the raw scrape interval, so a
+    # 240s (4*step) window finds fewer than the 2 samples rate() needs and
+    # silently returns empty — even though the counter has data. 600s was the
+    # empirically-confirmed minimum that recovered data; 900s adds margin.
+    rate_interval_s = max(4 * step, 900)
+    promql = (
+        promql.replace("$__rate_interval_ms", str(rate_interval_s * 1000))
+        .replace("$__interval_ms", str(step * 1000))
+        .replace("$__rate_interval", f"{rate_interval_s}s")
+        .replace("$__interval", f"{step}s")
+    )
+
     # Merge key = frozenset of (label, value) pairs, so series with identical
     # labels across chunks are grouped without a dependency on result order.
     merged = {}
@@ -326,31 +364,287 @@ def calculate_mad(values):
 
 
 def detect_deviation_resource(values, threshold=80):
-    """Resource metrics: flag if P95 exceeds threshold."""
+    """Resource metrics: flag if P95 exceeds threshold.
+    Returns (flagged, value_at_risk, decision_threshold)."""
     if not values:
-        return False, 0
+        return False, 0, threshold
     p95 = calculate_percentile(values, 95)
-    return p95 > threshold, p95
+    return p95 > threshold, p95, threshold
 
 
 def detect_deviation_spike(values):
-    """Rate/spike metrics: flag if max > median + 3*MAD."""
+    """Rate/spike metrics: flag if max > median + 3*MAD.
+    Returns (flagged, peak_val, spike_threshold)."""
     if not values:
-        return False, 0
+        return False, 0, 0
     peak_val = max(values)
     median, mad = calculate_mad(values)
     threshold = median + (3 * mad)
-    return peak_val > threshold, peak_val
+    return peak_val > threshold, peak_val, threshold
+
+
+def _eta_squared(points, group_key_fn):
+    """Fraction of total variance in points' values explained by group_key_fn(ts).
+    Used only to report which seasonality (daily vs weekly) dominates — not a
+    gating input."""
+    if not points:
+        return 0.0
+    values = [v for _, v in points]
+    grand_mean = sum(values) / len(values)
+    ss_total = sum((v - grand_mean) ** 2 for v in values)
+    if ss_total == 0:
+        return 0.0
+    groups = {}
+    for ts, v in points:
+        groups.setdefault(group_key_fn(ts), []).append(v)
+    ss_between = sum(len(g) * (sum(g) / len(g) - grand_mean) ** 2 for g in groups.values())
+    return ss_between / ss_total
+
+
+def _linreg_slope(xs, ys):
+    """Least-squares slope of ys over xs. Pure Python (no numpy)."""
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    den = sum((x - mean_x) ** 2 for x in xs)
+    return num / den if den else 0.0
+
+
+def build_seasonal_baseline(points, baseline_weeks=BASELINE_WEEKS_DEFAULT):
+    """Build a day-of-week x hour-of-day baseline model from raw
+    (epoch_seconds, value) baseline-window points for ONE series.
+
+    Returns None if points is empty, else:
+      {"buckets": {(weekday, hour): {"median":, "mad":, "n":}},
+       "global": {"median":, "mad":, "n":, "p50":, "p90":, "p95":, "p99":, "cv": float|None},
+       "trend_slope":, "baseline_end_ts":,
+       "dominant_seasonality": "daily"|"weekly",
+       "seasonality_strength": {"weekly": eta2, "daily": eta2}}
+    """
+    if not points:
+        return None
+
+    values = [v for _, v in points]
+    median, mad = calculate_mad(values)
+    global_stats = {
+        "median": median, "mad": mad, "n": len(values),
+        "p50": calculate_percentile(values, 50),
+        "p90": calculate_percentile(values, 90),
+        "p95": calculate_percentile(values, 95),
+        "p99": calculate_percentile(values, 99),
+        # Robust CV = MAD/median (consistent with this file's MAD-based spread
+        # vocabulary; classic stdev/mean is not robust to the bursty, skewed
+        # traffic these SPIKE metrics exhibit). None when median is ~0 to avoid
+        # a meaningless/huge ratio.
+        "cv": (mad / median) if median >= 1e-6 else None,
+    }
+
+    buckets_raw = {}
+    for ts, v in points:
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        buckets_raw.setdefault((dt.weekday(), dt.hour), []).append(v)
+    buckets = {}
+    for key, vals in buckets_raw.items():
+        b_median, b_mad = calculate_mad(vals)
+        buckets[key] = {"median": b_median, "mad": b_mad, "n": len(vals)}
+
+    # Trend: linear regression of daily median values across the baseline window.
+    daily_values = {}
+    for ts, v in points:
+        daily_values.setdefault(int(ts // 86400), []).append(v)
+    day_keys = sorted(daily_values)
+    if day_keys:
+        day0 = day_keys[0]
+        xs = [k - day0 for k in day_keys]
+        ys = [calculate_mad(daily_values[k])[0] for k in day_keys]
+        trend_slope = _linreg_slope(xs, ys)
+    else:
+        trend_slope = 0.0
+
+    weekly_eta2 = _eta_squared(points, lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc).weekday())
+    daily_eta2 = _eta_squared(points, lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc).hour)
+
+    return {
+        "buckets": buckets,
+        "global": global_stats,
+        "trend_slope": trend_slope,
+        "baseline_end_ts": max(ts for ts, _ in points),
+        "dominant_seasonality": "weekly" if weekly_eta2 > daily_eta2 else "daily",
+        "seasonality_strength": {"weekly": weekly_eta2, "daily": daily_eta2},
+    }
+
+
+def seasonal_upper_bound(model, target_ts, k=BAND_K_DEFAULT):
+    """(expected, upper_bound, lower_bound) at target_ts (epoch seconds), using
+    the model's (weekday, hour) bucket, falling back to the series' global
+    stats when the bucket has too few samples (MIN_BUCKET_SAMPLES)."""
+    dt = datetime.fromtimestamp(target_ts, tz=timezone.utc)
+    bucket = model["buckets"].get((dt.weekday(), dt.hour))
+    if bucket and bucket["n"] >= MIN_BUCKET_SAMPLES:
+        median, mad = bucket["median"], bucket["mad"]
+    else:
+        median, mad = model["global"]["median"], model["global"]["mad"]
+
+    days = (target_ts - model["baseline_end_ts"]) / 86400.0
+    # Clamped at 0: these are rate/count metrics (structurally non-negative).
+    # An unbounded trend extrapolation over sparse/noisy daily medians (e.g. a
+    # thin "global" fallback when the bucket has too few baseline samples) can
+    # otherwise drag expected — and therefore upper — negative, which would
+    # flag every non-negative peak regardless of magnitude.
+    expected = max(0.0, median + model["trend_slope"] * days)
+    # Floor mad_eff so a near-zero-variance bucket can't collapse the band to
+    # ~0 (the exact degenerate-MAD failure mode the flat median+3*MAD test had).
+    mad_eff = max(mad, expected * MAD_FLOOR_FRACTION, MAD_ABS_FLOOR)
+    upper = expected + k * mad_eff
+    lower = max(0.0, expected - k * mad_eff)
+    return expected, upper, lower
+
+
+def detect_deviation_seasonal(peak_val, peak_ts, model, k=BAND_K_DEFAULT):
+    """Returns (flagged, upper_bound). (False, 0) if model is None (no baseline
+    history for this series — floor_value remains the sole backstop, same as
+    today's behavior when there's no signal)."""
+    if model is None:
+        return False, 0
+    _expected, upper, _lower = seasonal_upper_bound(model, peak_ts, k)
+    return peak_val > upper, upper
+
+
+def _debug_seasonal_line(model, peak_ts, k):
+    """One-line summary of the bucket/threshold that gated a SPIKE decision,
+    for `analyze --debug` (used to calibrate band_k/MAD_ABS_FLOOR against real data)."""
+    dt = datetime.fromtimestamp(peak_ts, tz=timezone.utc)
+    bucket = model["buckets"].get((dt.weekday(), dt.hour))
+    if bucket and bucket["n"] >= MIN_BUCKET_SAMPLES:
+        source, n, median, mad = "bucket", bucket["n"], bucket["median"], bucket["mad"]
+    else:
+        source, n = "global", model["global"]["n"]
+        median, mad = model["global"]["median"], model["global"]["mad"]
+    expected, upper, _lower = seasonal_upper_bound(model, peak_ts, k)
+    mad_eff = max(mad, expected * MAD_FLOOR_FRACTION, MAD_ABS_FLOOR)
+    return (f"weekday={dt.weekday()} hour={dt.hour} source={source} n={n} "
+            f"median={median:.3f} mad={mad:.3f} mad_eff={mad_eff:.3f} "
+            f"expected={expected:.3f} upper={upper:.3f} k={k}")
+
+
+def _series_key(metric_labels):
+    """Stable, JSON-friendly key for a Prometheus label set (used for the
+    on-disk baseline cache)."""
+    return json.dumps(sorted((metric_labels or {}).items()), sort_keys=True)
+
+
+def _key_to_metric(key):
+    return dict(json.loads(key))
+
+
+def _cache_path(section, metric_slug_str, region, sub_label=None):
+    tag = f"{section}_{metric_slug_str}_{region or 'all'}"
+    if sub_label:
+        tag += f"_{slugify(sub_label)}"
+    return os.path.join(BASELINE_CACHE_DIR, f"{tag}.json")
+
+
+def load_baseline_cache(path):
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def save_baseline_cache(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = path + '.tmp'
+    with open(tmp_path, 'w') as f:
+        json.dump(data, f)
+    os.replace(tmp_path, path)  # atomic — survives a mid-write interruption
+
+
+def fetch_baseline_points_cached(client, cache_path, promql, baseline_start_ms, baseline_end_ms,
+                                  region=None, max_weeks=MAX_BASELINE_WEEKS):
+    """Like query_prometheus, but persists raw points to a local JSON cache
+    (cache_path) and only fetches the gap between what's cached and
+    [baseline_start_ms, baseline_end_ms]. Grows the cache incrementally across
+    runs (pruned to max_weeks) instead of re-fetching the full window every time.
+
+    Returns {"data": {"resultType": "matrix", "result": [{"metric":, "values": [[ts, val], ...]}, ...]}}
+    — same shape as query_prometheus, so callers don't need to special-case it.
+    """
+    promql_hash = hashlib.sha256(promql.encode('utf-8')).hexdigest()[:16]
+    cache = load_baseline_cache(cache_path)
+    if cache is None or cache.get("promql_hash") != promql_hash:
+        cache = {"promql_hash": promql_hash, "series": {}}  # stale/missing/query changed -> fresh
+
+    series_points_by_key = {
+        key: [(float(p[0]), float(p[1])) for p in pts]
+        for key, pts in cache.get("series", {}).items()
+    }
+    all_cached_ts = [p[0] for pts in series_points_by_key.values() for p in pts]
+    cached_min_s = min(all_cached_ts) if all_cached_ts else None
+    cached_max_s = max(all_cached_ts) if all_cached_ts else None
+    baseline_start_s = baseline_start_ms // 1000
+
+    fetch_ranges = []
+    if cached_max_s is None:
+        fetch_ranges.append((baseline_start_ms, baseline_end_ms))
+    else:
+        if cached_max_s * 1000 < baseline_end_ms:
+            fetch_ranges.append((max(int(cached_max_s * 1000), baseline_start_ms), baseline_end_ms))
+        if baseline_start_s < cached_min_s:
+            fetch_ranges.append((baseline_start_ms, int(cached_min_s * 1000)))
+
+    for range_start_ms, range_end_ms in fetch_ranges:
+        if range_start_ms >= range_end_ms:
+            continue
+        res = query_prometheus(client, promql, range_start_ms, range_end_ms, region)
+        for series in res.get('data', {}).get('result', []):
+            key = _series_key(series.get('metric', {}))
+            pts = series_points_by_key.setdefault(key, [])
+            existing_ts = {p[0] for p in pts}
+            for ts, val in series.get('values', []):
+                try:
+                    ts_f, val_f = float(ts), float(val)
+                except (TypeError, ValueError):
+                    continue
+                if ts_f not in existing_ts:
+                    pts.append((ts_f, val_f))
+                    existing_ts.add(ts_f)
+
+    cutoff_s = baseline_end_ms // 1000 - max_weeks * 7 * 24 * 3600
+    result = []
+    series_out = {}
+    for key, pts in series_points_by_key.items():
+        pruned = sorted(p for p in pts if p[0] >= cutoff_s)
+        if not pruned:
+            continue
+        series_out[key] = pruned
+        result.append({"metric": _key_to_metric(key), "values": [[p[0], p[1]] for p in pruned]})
+
+    all_out_ts = [p[0] for pts in series_out.values() for p in pts]
+    save_baseline_cache(cache_path, {
+        "promql_hash": promql_hash,
+        "series": {key: [[p[0], p[1]] for p in pts] for key, pts in series_out.items()},
+        "min_ts": min(all_out_ts) if all_out_ts else None,
+        "max_ts": max(all_out_ts) if all_out_ts else None,
+    })
+
+    return {"data": {"resultType": "matrix", "result": result}}
 
 
 def detect_deviation(deviation_rule, values, deviation_threshold=None):
+    """Returns (flagged, value_at_risk, decision_threshold)."""
     if not values:
-        return False, 0
-    if 'RESOURCE' in deviation_rule:
+        return False, 0, 0
+    # Case-insensitive so YAML tokens like 'SPIKE' match (configs use uppercase).
+    rule = (deviation_rule or '').upper()
+    if 'RESOURCE' in rule:
         return detect_deviation_resource(values, deviation_threshold or 80)
-    if 'RATE' in deviation_rule or 'Spike' in deviation_rule:
+    if 'RATE' in rule or 'SPIKE' in rule:
         return detect_deviation_spike(values)
-    return False, max(values)  # STATE or free-text → floor only
+    return False, max(values), 0  # STATE or free-text → floor only
 
 
 def check_floor(floor_value, floor_op, values):
@@ -424,9 +718,9 @@ def format_points(points):
     ]
 
 
-def slice_zoom(points, center_ts, window_s=1800):
-    """Points within center_ts +/- window_s (default 30 min)."""
-    return [(ts, v) for ts, v in points if center_ts - window_s <= ts <= center_ts + window_s]
+def slice_zoom(points, start_ts, end_ts):
+    """Points within [start_ts, end_ts]."""
+    return [(ts, v) for ts, v in points if start_ts <= ts <= end_ts]
 
 
 def fill_state_gaps(deviated):
@@ -519,6 +813,14 @@ def extract_panel_queries(dashboard_json, panel_id):
                 if not t.get("expr"):
                     continue
                 label = t.get("legendFormat") or t.get("refId", "?")
+                # legendFormat is a Grafana frontend template (e.g. "{{instance}} -
+                # X Rate"), normally resolved per-series by Grafana's UI using each
+                # series' own labels. This script bypasses that UI and uses the
+                # label as a single group-level sub_label shared by every series in
+                # the group, so an unresolved {{...}} token would be meaningless
+                # (and misleading) here — strip it rather than leave it literal.
+                label = re.sub(r'\{\{.*?\}\}', '', label).strip().lstrip('-–').strip()
+                label = label or t.get("refId", "?")  # legendFormat was only a template token
                 queries.append((f"{t.get('refId', '?')} — {label}", t["expr"]))
             return queries
     raise KeyError(f"panel {panel_id} not found")
@@ -675,6 +977,12 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     floor_value = config.get('floor_value')
     floor_op = config.get('floor_op', '>=')
     is_state = 'STATE' in deviation_rule
+    is_spike = 'SPIKE' in deviation_rule.upper()
+    baseline_weeks = config.get('baseline_weeks', BASELINE_WEEKS_DEFAULT)
+    band_k = config.get('band_k', BAND_K_DEFAULT)
+    baseline_start_ms = start_epoch_ms - baseline_weeks * 7 * 24 * 3600 * 1000
+    baseline_end_ms = start_epoch_ms
+    metric_slug = slugify(metric_name)
     data_view = config.get('data_view', 'chart')
 
     # Resolve dashboard uid + panel
@@ -736,16 +1044,72 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
               f"Grafana panel", file=sys.stderr)
         return None
 
+    # Resolve Grafana template variables ($service, $instance, etc.) from the
+    # dashboard.  These are NOT Prometheus query-language features — they are
+    # Grafana dashboard variables that the frontend resolves client-side before
+    # sending the query to the datasource.  The script bypasses the frontend, so
+    # we must resolve them ourselves.
+    #
+    # Variables set to "All" (includeAll=True, no current selection) expand to
+    # the regex `.*` in Grafana's `=~` matcher.  Variables with a fixed
+    # selection use the selected value verbatim.  $region is already resolved
+    # separately by query_prometheus(), so it is left alone here.
+    template_vars = {}
+    if dashboard_uid:
+        try:
+            dash = client.get_dashboard(dashboard_uid)
+            for tv in dash.get('dashboard', {}).get('templating', {}).get('list', []):
+                name = tv.get('name')
+                if not name or name == 'region':
+                    continue
+                current = tv.get('current') or {}
+                text = current.get('text')
+                if text and text != 'All' and text != ['All']:
+                    template_vars[name] = '|'.join(str(v) for v in (text if isinstance(text, list) else [text]))
+                else:
+                    template_vars[name] = '.*'  # "All" = match everything
+        except Exception:
+            pass  # template vars are optional; individual queries may fail
+
+    # Apply template variable resolution to every query before any execution
+    resolved_queries = []
+    for sub_label, promql in queries:
+        for var_name, var_value in template_vars.items():
+            promql = promql.replace(f'${var_name}', var_value)
+        resolved_queries.append((sub_label, promql))
+
     # Informational table: no deviation/floor rules, collect ALL series with labels
     if data_view == 'table' and not deviation_rule and floor_value is None:
-        return _build_informational_table(client, queries, metric_name,
+        return _build_informational_table(client, resolved_queries, metric_name,
                                           start_epoch_ms, end_epoch_ms,
                                           region, section)
 
     groups = []  # (sub_label, [ {instance, peak, timestamp, points} ])
-    for sub_label, promql in queries:
+    for sub_label, promql in resolved_queries:
         print(f"  querying data to {section} {metric_name}", file=sys.stderr)
         res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
+
+        # SPIKE metrics: build a per-series seasonal baseline model (day-of-week x
+        # hour-of-day median/MAD) from a local, incrementally-updated cache of
+        # baseline_weeks..now history, instead of the flat median+3*MAD test.
+        baseline_models = {}
+        pooled_model = None
+        if is_spike:
+            cache_path = _cache_path(section, metric_slug, region, sub_label)
+            baseline_res = fetch_baseline_points_cached(
+                client, cache_path, promql, baseline_start_ms, baseline_end_ms, region,
+            )
+            all_baseline_points = []
+            for series in baseline_res.get('data', {}).get('result', []):
+                bpoints = series_points(series)
+                if not bpoints:
+                    continue
+                key = frozenset(series.get('metric', {}).items())
+                baseline_models[key] = build_seasonal_baseline(bpoints, baseline_weeks)
+                all_baseline_points.extend(bpoints)
+            if all_baseline_points:
+                pooled_model = build_seasonal_baseline(all_baseline_points, baseline_weeks)
+
         deviated = []
         for series in res.get('data', {}).get('result', []):
             points = series_points(series)
@@ -758,13 +1122,32 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 peak_ts, peak_val = min(points, key=lambda p: p[1])
             else:
                 peak_ts, peak_val = max(points, key=lambda p: p[1])
-            flagged = check_floor(floor_value, floor_op, values) or detect_deviation(deviation_rule, values, deviation_threshold)[0]
+            flagged_floor = check_floor(floor_value, floor_op, values)
+            if is_spike:
+                key = frozenset(series.get('metric', {}).items())
+                model = baseline_models.get(key) or pooled_model
+                flagged_dev, dev_threshold = detect_deviation_seasonal(peak_val, peak_ts, model, band_k)
+            else:
+                flagged_dev, _, dev_threshold = detect_deviation(deviation_rule, values, deviation_threshold)
+            flagged = flagged_floor or flagged_dev
+            # Reference threshold: the actual decision boundary that triggered.
+            if flagged_floor and floor_value is not None:
+                ref_threshold = floor_value
+            elif flagged_dev and dev_threshold:
+                ref_threshold = dev_threshold
+            else:
+                ref_threshold = peak_val  # fallback (should not happen when flagged)
             if flagged:
+                if is_spike and DEBUG_SEASONAL and model is not None:
+                    print(f"  DEBUG spike {section} {metric_name} "
+                          f"{series_label(series.get('metric', {}))}: "
+                          f"{_debug_seasonal_line(model, peak_ts, band_k)}", file=sys.stderr)
                 deviated.append({
                     "instance": series_label(series.get('metric', {})),
                     "peak": peak_val,
                     "timestamp": peak_ts,
                     "points": points,
+                    "threshold": ref_threshold,
                 })
         if deviated:
             groups.append((sub_label, deviated))
@@ -774,7 +1157,6 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
         return None
 
     print(f"  building {section} {metric_name}", file=sys.stderr)
-    metric_slug = slugify(metric_name)
 
     html_output = ""
     for sub_label, deviated in groups:
@@ -805,7 +1187,7 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                     html_output += f'  <li>{dev["instance"]}: up (stable)</li>\n'
             html_output += '</ul>\n'
         else:
-            reference = deviated[0]['peak']
+            reference = deviated[0].get('threshold', deviated[0]['peak'])
             html_output += f"<p><strong>{title} deviation detected</strong></p>\n"
             html_output += f"<p>Reference = {reference:.2f} {unit}</p>\n"
             if data_view == 'table':
@@ -840,12 +1222,19 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 f'<ri:attachment ri:filename="{os.path.basename(overview_path)}"/></ac:image>\n'
             )
 
-            # Zoom chart: only for full chart mode.
+            # Zoom chart: only for full chart mode. Window spans from the
+            # earliest to the latest deviated instance's own peak (+ margin),
+            # not just the first instance's — otherwise instances whose peak
+            # lands far from deviated[0]'s get silently dropped from the zoom
+            # even though they're clearly visible (and flagged) in the overview.
             if data_view == 'chart':
-                center_ts = deviated[0]['timestamp']
+                margin_s = 1800
+                peak_timestamps = [dev['timestamp'] for dev in deviated]
+                zoom_start = min(peak_timestamps) - margin_s
+                zoom_end = max(peak_timestamps) + margin_s
                 zoom_lines = []
                 for dev in deviated:
-                    zoomed = slice_zoom(dev['points'], center_ts)
+                    zoomed = slice_zoom(dev['points'], zoom_start, zoom_end)
                     if len(zoomed) >= 3:
                         zoom_lines.append({"label": dev["instance"], "points": format_points(zoomed)})
                 if zoom_lines:
@@ -864,9 +1253,27 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     return html_output or None
 
 
-def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
+def metric_slug(name):
+    """Canonical token for a metric name: lowercase, non-alnum → '-', collapsed.
+    e.g. 'Error Rates (Spikes) - By Instance' → 'error-rates-spikes-by-instance'."""
+    return re.sub(r'-+', '-', re.sub(r'[^a-z0-9]+', '-', name.lower())).strip('-')
+
+
+def load_metric_slugs(config_file):
+    """{slug: metric_name} for every active metric in config_file. Used by the
+    generators to validate --metric tokens and list valid slugs on error."""
+    with open(config_file, 'r') as f:
+        cfg = yaml.safe_load(f) or {}
+    return {metric_slug(k): k for k, v in cfg.items()
+            if isinstance(v, dict) and v.get('status') == 'active'}
+
+
+def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filter=None):
     """Run the full fetch + deviation-detection + chart pipeline for every
-    active metric in config_file. Returns the Confluence Storage HTML block."""
+    active metric in config_file. Returns the Confluence Storage HTML block.
+
+    metric_filter: optional set of metric slugs (see metric_slug); when given,
+    only matching metrics are analysed."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     with open(config_file, 'r') as f:
@@ -885,6 +1292,8 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None):
     try:
         for metric_name, cfg in config.items():
             if isinstance(cfg, dict) and cfg.get('status') == 'active':
+                if metric_filter and metric_slug(metric_name) not in metric_filter:
+                    continue
                 result = analyze_metric(client, metric_name, cfg, start_epoch_ms, end_epoch_ms,
                                         region, section, defaults, failures)
                 if result:
@@ -957,14 +1366,25 @@ def main():
         except RuntimeError as e:
             sys.exit(f"{e}")
     elif mode == "analyze":
-        if len(sys.argv) < 5:
-            sys.exit("Usage: grafana_metrics.py analyze <config_yaml> <start_epoch_ms> <end_epoch_ms> [region]")
-        config_file = sys.argv[2]
-        start_epoch_ms = int(sys.argv[3])
-        end_epoch_ms = int(sys.argv[4])
-        region = sys.argv[5] if len(sys.argv) > 5 else None
+        global DEBUG_SEASONAL
+        argv = sys.argv[2:]
+        metric_filter = None
+        if "--metric" in argv:
+            i = argv.index("--metric")
+            metric_filter = {s for s in argv[i + 1].split(",") if s}
+            del argv[i:i + 2]
+        if "--debug" in argv:
+            argv.remove("--debug")
+            DEBUG_SEASONAL = True
+        if len(argv) < 3:
+            sys.exit("Usage: grafana_metrics.py analyze <config_yaml> <start_epoch_ms> "
+                     "<end_epoch_ms> [region] [--metric slug[,slug...]] [--debug]")
+        config_file = argv[0]
+        start_epoch_ms = int(argv[1])
+        end_epoch_ms = int(argv[2])
+        region = argv[3] if len(argv) > 3 else None
         try:
-            print(analyze(config_file, start_epoch_ms, end_epoch_ms, region))
+            print(analyze(config_file, start_epoch_ms, end_epoch_ms, region, metric_filter))
         except Exception as e:
             sys.exit(f"Error: {e}")
     else:

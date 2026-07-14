@@ -1,5 +1,6 @@
 gcn-pm/tmp/
 gcn-pm/.auth/
+gcn-pm/.baseline_cache/
 gcn-pm/scripts/__pycache__/
 .playwright-mcp/
 oncall-alerts-*.png
