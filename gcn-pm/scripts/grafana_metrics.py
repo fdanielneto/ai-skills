@@ -255,10 +255,12 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
     Splits long time ranges into weekly chunks to stay under Grafana's
     11 000 points-per-timeseries limit while keeping 1-minute resolution.
 
-    Returns {"data": {"resultType": ..., "result": [...]}}.
+    Returns {"data": {"resultType": ..., "result": [...]}, "failed_ranges": [(start_s, end_s), ...]}.
 
     Per-query failures fall back to an empty result (preserves prior behaviour);
     a dead endpoint is caught earlier at client handshake in main(), which raises.
+    Failed chunks are reported back via "failed_ranges" so incremental callers
+    (fetch_baseline_points_cached) can avoid marking that span as fetched.
     """
     if region:
         promql = promql.replace("$region", region)
@@ -296,6 +298,7 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
     # Merge key = frozenset of (label, value) pairs, so series with identical
     # labels across chunks are grouped without a dependency on result order.
     merged = {}
+    failed_ranges = []
 
     total_chunks = max(1, (end_s - start_s + chunk_size - 1) // chunk_size)
     chunk_i = 0
@@ -311,6 +314,7 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
             )
         except Exception as e:
             print(f"WARN: query failed for {region or 'aggregated'} ({chunk_start}..{chunk_end}): {e}", file=sys.stderr)
+            failed_ranges.append((chunk_start, chunk_end))
             chunk_start = chunk_end
             continue
 
@@ -323,7 +327,7 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
         chunk_start = chunk_end
 
     if not merged:
-        return {"data": {"resultType": "matrix", "result": []}}
+        return {"data": {"resultType": "matrix", "result": []}, "failed_ranges": failed_ranges}
 
     result = []
     for key, entry in merged.items():
@@ -336,7 +340,7 @@ def query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region=None, 
         entry["values"] = deduped
         result.append({"metric": dict(entry["metric"]), "values": entry["values"]})
 
-    return {"data": {"resultType": "matrix", "result": result}}
+    return {"data": {"resultType": "matrix", "result": result}, "failed_ranges": failed_ranges}
 
 
 def calculate_percentile(values, p):
@@ -570,8 +574,14 @@ def fetch_baseline_points_cached(client, cache_path, promql, baseline_start_ms, 
     [baseline_start_ms, baseline_end_ms]. Grows the cache incrementally across
     runs (pruned to max_weeks) instead of re-fetching the full window every time.
 
-    Returns {"data": {"resultType": "matrix", "result": [{"metric":, "values": [[ts, val], ...]}, ...]}}
-    — same shape as query_prometheus, so callers don't need to special-case it.
+    Coverage is tracked via explicit "covered_start_s"/"covered_end_s" boundaries
+    (the contiguous span actually confirmed fetched), NOT inferred from the min/max
+    timestamp of the data itself — a chunk that fails mid-fetch (see query_prometheus's
+    failed_ranges) must not let a later, successful chunk's timestamps push the
+    boundary past the gap, or the gap is never retried on subsequent runs.
+
+    Returns {"data": {"resultType": "matrix", "result": [{"metric":, "values": [[ts, val], ...]}, ...]},
+             "failed_ranges": [(start_s, end_s), ...]}
     """
     promql_hash = hashlib.sha256(promql.encode('utf-8')).hexdigest()[:16]
     cache = load_baseline_cache(cache_path)
@@ -582,21 +592,24 @@ def fetch_baseline_points_cached(client, cache_path, promql, baseline_start_ms, 
         key: [(float(p[0]), float(p[1])) for p in pts]
         for key, pts in cache.get("series", {}).items()
     }
-    all_cached_ts = [p[0] for pts in series_points_by_key.values() for p in pts]
-    cached_min_s = min(all_cached_ts) if all_cached_ts else None
-    cached_max_s = max(all_cached_ts) if all_cached_ts else None
+    # None on a first-time/stale cache, and on any cache predating this field —
+    # those are treated as cold (one full refetch, then normal incremental
+    # behavior resumes; existing_ts dedup below means no data is lost).
+    covered_start_s = cache.get("covered_start_s")
+    covered_end_s = cache.get("covered_end_s")
     baseline_start_s = baseline_start_ms // 1000
 
-    fetch_ranges = []
-    if cached_max_s is None:
-        fetch_ranges.append((baseline_start_ms, baseline_end_ms))
+    fetch_ranges = []  # (side, range_start_ms, range_end_ms)
+    if covered_start_s is None and covered_end_s is None:
+        fetch_ranges.append(("cold", baseline_start_ms, baseline_end_ms))
     else:
-        if cached_max_s * 1000 < baseline_end_ms:
-            fetch_ranges.append((max(int(cached_max_s * 1000), baseline_start_ms), baseline_end_ms))
-        if baseline_start_s < cached_min_s:
-            fetch_ranges.append((baseline_start_ms, int(cached_min_s * 1000)))
+        if covered_end_s is not None and covered_end_s * 1000 < baseline_end_ms:
+            fetch_ranges.append(("forward", covered_end_s * 1000, baseline_end_ms))
+        if covered_start_s is not None and baseline_start_s < covered_start_s:
+            fetch_ranges.append(("backward", baseline_start_ms, covered_start_s * 1000))
 
-    for range_start_ms, range_end_ms in fetch_ranges:
+    all_failed_ranges = []
+    for side, range_start_ms, range_end_ms in fetch_ranges:
         if range_start_ms >= range_end_ms:
             continue
         res = query_prometheus(client, promql, range_start_ms, range_end_ms, region)
@@ -613,6 +626,20 @@ def fetch_baseline_points_cached(client, cache_path, promql, baseline_start_ms, 
                     pts.append((ts_f, val_f))
                     existing_ts.add(ts_f)
 
+        failed = res.get('failed_ranges') or []
+        all_failed_ranges.extend(failed)
+        range_start_s, range_end_s = range_start_ms // 1000, range_end_ms // 1000
+        # Only the portion contiguous with the anchor edge is trustworthy —
+        # a failure stops the boundary right there instead of skipping past it.
+        if side in ("cold", "forward"):
+            trusted_end_s = min(f[0] for f in failed) if failed else range_end_s
+            covered_end_s = trusted_end_s if covered_end_s is None else max(covered_end_s, trusted_end_s)
+            if side == "cold":
+                covered_start_s = range_start_s
+        else:  # backward
+            trusted_start_s = max(f[1] for f in failed) if failed else range_start_s
+            covered_start_s = trusted_start_s if covered_start_s is None else min(covered_start_s, trusted_start_s)
+
     cutoff_s = baseline_end_ms // 1000 - max_weeks * 7 * 24 * 3600
     result = []
     series_out = {}
@@ -623,15 +650,20 @@ def fetch_baseline_points_cached(client, cache_path, promql, baseline_start_ms, 
         series_out[key] = pruned
         result.append({"metric": _key_to_metric(key), "values": [[p[0], p[1]] for p in pruned]})
 
+    if covered_start_s is not None:
+        covered_start_s = max(covered_start_s, cutoff_s)
+
     all_out_ts = [p[0] for pts in series_out.values() for p in pts]
     save_baseline_cache(cache_path, {
         "promql_hash": promql_hash,
         "series": {key: [[p[0], p[1]] for p in pts] for key, pts in series_out.items()},
         "min_ts": min(all_out_ts) if all_out_ts else None,
         "max_ts": max(all_out_ts) if all_out_ts else None,
+        "covered_start_s": covered_start_s,
+        "covered_end_s": covered_end_s,
     })
 
-    return {"data": {"resultType": "matrix", "result": result}}
+    return {"data": {"resultType": "matrix", "result": result}, "failed_ranges": all_failed_ranges}
 
 
 def detect_deviation(deviation_rule, values, deviation_threshold=None):
@@ -952,7 +984,7 @@ def _build_informational_table(client, queries, metric_name,
 
 
 def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
-                   region, section="xcc", defaults=None, failures=None):
+                   region, section="xcc", defaults=None, failures=None, baseline_warnings=None):
     """Analyze one metric and return HTML for its deviated series (or None).
 
     Query source, in priority order:
@@ -970,6 +1002,12 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     unreliable for that metric and deviation detection is skipped for it
     (queries stays empty below, so this function returns None before the
     detection loop ever runs).
+
+    `baseline_warnings` (optional list, appended in place): for SPIKE metrics,
+    if this run's baseline-history fetch hit any Prometheus/HTTP errors, an
+    entry is recorded here instead of only logging to stderr — seasonal
+    deviation detection is degraded (falls back to floor-only) for the
+    affected series until the gap is backfilled on a later run.
     """
     print(f"  checking {section} {metric_name} deviation", file=sys.stderr)
     deviation_rule = config.get('deviation', '')
@@ -1099,6 +1137,12 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
             baseline_res = fetch_baseline_points_cached(
                 client, cache_path, promql, baseline_start_ms, baseline_end_ms, region,
             )
+            baseline_failed = baseline_res.get('failed_ranges') or []
+            if baseline_failed and baseline_warnings is not None:
+                baseline_warnings.append({
+                    "metric": metric_name, "sub_label": sub_label, "region": region,
+                    "chunks_failed": len(baseline_failed),
+                })
             all_baseline_points = []
             for series in baseline_res.get('data', {}).get('result', []):
                 bpoints = series_points(series)
@@ -1284,6 +1328,7 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filte
     all_html = ""
     has_deviation = False
     failures = []
+    baseline_warnings = []
 
     # One client/session per invocation, reused across all metrics.
     # A dead endpoint raises here (FAIL-FAST) instead of masking as "no deviation".
@@ -1295,7 +1340,7 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filte
                 if metric_filter and metric_slug(metric_name) not in metric_filter:
                     continue
                 result = analyze_metric(client, metric_name, cfg, start_epoch_ms, end_epoch_ms,
-                                        region, section, defaults, failures)
+                                        region, section, defaults, failures, baseline_warnings)
                 if result:
                     all_html += result
                     has_deviation = True
@@ -1337,6 +1382,22 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filte
             final_html += (
                 f'<tr><td>{f["metric"]}</td><td>{f["panel_id"]}</td>'
                 f'<td>{f["dashboard"]}</td><td>{f["reason"]}</td></tr>'
+            )
+        final_html += '</table></ac:rich-text-body></ac:structured-macro>\n'
+
+    if baseline_warnings:
+        final_html += (
+            '<ac:structured-macro ac:name="note" ac:schema-version="1">'
+            '<ac:rich-text-body>'
+            f'<p><strong>ℹ {len(baseline_warnings)} SPIKE metric series had incomplete '
+            'baseline history fetches — seasonal deviation detection is degraded '
+            '(floor-only) for these until the gap is backfilled on a later run.</strong></p>'
+            '<table><tr><th>Metric</th><th>Sub-query</th><th>Region</th><th>Chunks failed</th></tr>'
+        )
+        for w in baseline_warnings:
+            final_html += (
+                f'<tr><td>{w["metric"]}</td><td>{w["sub_label"] or ""}</td>'
+                f'<td>{w["region"] or ""}</td><td>{w["chunks_failed"]}</td></tr>'
             )
         final_html += '</table></ac:rich-text-body></ac:structured-macro>\n'
 
