@@ -13,8 +13,49 @@ from datetime import datetime
 
 _DEFAULT_BAR_WIDTH_DAYS = 1.0 / 24  # 1 hour, used when there's < 2 points to space bars from
 
+# Categorical palette + chart chrome from the dataviz skill's validated reference
+# instance (references/palette.md, light mode — these charts are always rendered
+# as static PNGs on a white Confluence page, never dark mode). Slot order is the
+# CVD-safety mechanism (max-min adjacent ΔE), so keep it as-is when indexing.
+PALETTE = ['#2a78d6', '#1baf7a', '#eda100', '#008300',
+           '#4a3aa7', '#e34948', '#e87ba4', '#eb6834']
+_THRESHOLD_COLOR = '#d03b3b'  # status "critical" red — deliberately distinct from PALETTE[5]
+_SURFACE = '#fcfcfb'
+_PRIMARY_INK = '#0b0b0b'
+_SECONDARY_INK = '#52514e'
+_MUTED_INK = '#898781'
+_GRIDLINE = '#e1e0d9'
+_AXIS_LINE = '#c3c2b7'
+
+CHART_STYLE = {
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Segoe UI', 'Helvetica Neue', 'Arial', 'DejaVu Sans'],
+    'axes.prop_cycle': plt.cycler(color=PALETTE),
+    'axes.facecolor': _SURFACE,
+    'figure.facecolor': _SURFACE,
+    'axes.edgecolor': _AXIS_LINE,
+    'axes.titlecolor': _PRIMARY_INK,
+    'axes.titleweight': 'bold',
+    'axes.titlesize': 13,
+    'axes.labelcolor': _SECONDARY_INK,
+    'axes.labelsize': 10,
+    'xtick.color': _MUTED_INK,
+    'ytick.color': _MUTED_INK,
+    'xtick.labelsize': 9,
+    'ytick.labelsize': 9,
+    'grid.color': _GRIDLINE,
+    'grid.linewidth': 0.8,
+    'legend.frameon': False,
+    'legend.labelcolor': _SECONDARY_INK,
+}
+
 
 def render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
+    with plt.style.context(CHART_STYLE):
+        _render_chart(title, output_path, x_label, y_label, data, render_cfg)
+
+
+def _render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
     render_cfg = render_cfg or {}
     draw_style = render_cfg.get('draw_style', 'line')
     lines = data.get('lines', [])
@@ -38,6 +79,8 @@ def render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
         parsed_lines.append((line.get('label'), x_vals, y_vals))
 
     fig, ax = plt.subplots(figsize=(10, 4))
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
 
     if draw_style in ('bars', 'points'):
         _render_bars(ax, parsed_lines)
@@ -49,7 +92,8 @@ def render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
 
     threshold = data.get('threshold')
     if threshold:
-        ax.axhline(y=threshold['value'], color='r', linestyle='--', label=threshold.get('label', 'Threshold'))
+        ax.axhline(y=threshold['value'], color=_THRESHOLD_COLOR, linestyle='--',
+                    label=threshold.get('label', 'Threshold'))
 
     scale = render_cfg.get('scale')
     if scale == 'log':
@@ -66,11 +110,11 @@ def render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
     fig.autofmt_xdate()
 
     if len(lines) > 0 or threshold:
-        ax.legend()
+        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize='small')
 
-    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.grid(True)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150)
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -85,12 +129,11 @@ def _render_state(ax, parsed_lines):
     into a single line — they read as a small stack just below 1, while still
     clearly being value=1. Rendered as steps so 1->0 / 0->1 transitions are sharp.
     """
-    cmap = plt.get_cmap('tab10')
     for i, (label, x_vals, y_vals) in enumerate(parsed_lines):
         offset = i * _STATE_OFFSET
         y_shifted = [y - offset for y in y_vals]
         ax.plot(x_vals, y_shifted, drawstyle='steps-post', linewidth=1.5,
-                color=cmap(i % 10), label=label)
+                color=PALETTE[i % len(PALETTE)], label=label)
 
 
 def _render_bars(ax, parsed_lines):
