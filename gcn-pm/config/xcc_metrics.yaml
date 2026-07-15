@@ -26,92 +26,81 @@ Error Rates (Spikes) - By Instance:
   deviation: SPIKE
   data_view: chart
   panel_id: 800
-  floor_value: 2
-  floor_op: ">"
   description: "XCC error rates (spikes) by XCC instance"
   series_floor:
-    total_error_rate: 3    # acima do max observado por instância ~2.40
-    "4xx_rate": 2.5        # acima do p99.9 ~1.55
-    "5xx_rate": 1.5        # acima do p99.9 ~0.94
-    "6xx_rate": 0.1        # acima do p99.9 ~0.034 (6xx deve ser raríssimo)
+    total_error_rate: {value: 3, op: ">"}    # above the max observed per instance ~2.40
+    "4xx_rate": {value: 2.5, op: ">"}        # above p99.9 ~1.55
+    "5xx_rate": {value: 1.5, op: ">"}        # above p99.9 ~0.94
+    "6xx_rate": {value: 0.1, op: ">"}        # above p99.9 ~0.034 (6xx should be extremely rare)
 Custom Metrics Rates (Spikes) - By Instance:
   status: active
   deviation: SPIKE
   data_view: chart
   panel_id: 801
-  floor_value: 7
-  floor_op: ">"
   description: "XCC custom metrics rates (spikes) by XCC instance"
   series_floor:
-    emergency_invites_rate: 5   # sem dados históricos (0 séries) — valor conservador
-    inbound_invites_rate: 4     # acima do p99.9 ~2.87
-    outbound_offnet_rate: 6     # acima do p99.9 ~4.86
-    outbound_onnet_rate: 0.05   # acima do p99.9 ~0.008
-    rtpengine_failure_rate: 0.1 # acima do p99.9 ~0.008
-    siprec_calls_rate: 5        # sem dados históricos — valor conservador
+    emergency_invites_rate: {value: 5, op: ">"}   # no historical data (0 series) — conservative value
+    inbound_invites_rate: {value: 4, op: ">"}     # above p99.9 ~2.87
+    outbound_offnet_rate: {value: 6, op: ">"}     # above p99.9 ~4.86
+    outbound_onnet_rate: {value: 0.05, op: ">"}   # above p99.9 ~0.008
+    rtpengine_failure_rate: {value: 0.1, op: ">"} # above p99.9 ~0.008
+    siprec_calls_rate: {value: 5, op: ">"}        # no historical data — conservative value
 Custom Metrics Rates (Spikes):
   status: active
   deviation: SPIKE
   data_view: chart
   panel_id: 232
-  floor_value: 20
-  floor_op: ">"
   description: "XCC custom metrics rates (spikes)"
   series_floor:
-    total_custom_rate: 20                    # sem dados históricos (0 séries) — mantém o floor da métrica
-    emergency_invites_rate: 5                # sem dados históricos (0 séries) — valor conservador
-    inbound_invites_rate: 9                  # acima do p99.9 ~8.03
-    outbound_offnet_invites_rate: 11         # acima do p99.9 ~8.66
-    outbound_onnet_invites_rate: 0.05        # acima do p99.9 ~0.012 (baseline quase-zero)
-    rtpengine_connection_failure_rate: 0.1   # acima do p99.9 ~0.010
-    siprec_calls_rate: 5                     # sem dados históricos (0 séries) — valor conservador
+    total_custom_rate: {value: 20, op: ">"}                  # no historical data (0 series) — keeps the metric's floor
+    emergency_invites_rate: {value: 5, op: ">"}               # no historical data (0 series) — conservative value
+    inbound_invites_rate: {value: 9, op: ">"}                 # above p99.9 ~8.03
+    outbound_offnet_invites_rate: {value: 11, op: ">"}        # above p99.9 ~8.66
+    outbound_onnet_invites_rate: {value: 0.05, op: ">"}       # above p99.9 ~0.012 (near-zero baseline)
+    rtpengine_connection_failure_rate: {value: 0.1, op: ">"}  # above p99.9 ~0.010
+    siprec_calls_rate: {value: 5, op: ">"}                    # no historical data (0 series) — conservative value
 Error Rates (Spikes):
   status: active
   deviation: SPIKE
   data_view: chart
   panel_id: 231
-  floor_value: 4
-  floor_op: ">"
   description: "XCC error rates (spikes)"
   series_floor:
-    total_error_rate: 6    # acima do max observado ~5.25
-    "4xx_rate": 3          # acima do p99.9 ~2.81
-    "5xx_rate": 2          # acima do p99.9 ~1.92
-    "6xx_rate": 0.15       # acima do p99.9 ~0.058 (6xx deve ser raríssimo)
+    total_error_rate: {value: 6, op: ">"}    # above the observed max ~5.25
+    "4xx_rate": {value: 3, op: ">"}          # above p99.9 ~2.81
+    "5xx_rate": {value: 2, op: ">"}          # above p99.9 ~1.92
+    "6xx_rate": {value: 0.15, op: ">"}       # above p99.9 ~0.058 (6xx should be extremely rare)
 XCC CPU Stats:
   status: active
   deviation: RESOURCE
   data_view: chart
   panel_id: 11
-  deviation_threshold: 300
-  floor_value: 10
-  floor_op: ">"
+  deviation_threshold: "300%"
   description: "XCC CPU stats"
   series_floor:
-    user: 3      # sem dados históricos (query "A — User" nunca devolveu séries); consistente com 'system' por precaução
-    system: 3    # baseline p99.9 ~0.77, max ~1.0
-    iowait: 1    # baseline p99.9 ~0.21, max ~0.26
-    guest: 1     # baseline sempre 0
+    user: {value: 3, op: ">"}      # no historical data (query "A — User" never returned series); kept consistent with 'system' as a precaution
+    system: {value: 3, op: ">"}    # baseline p99.9 ~0.77, max ~1.0
+    iowait: {value: 1, op: ">"}    # baseline p99.9 ~0.21, max ~0.26
+    guest: {value: 1, op: ">"}     # baseline always 0
 XCC System Load:
   status: active
   deviation: RESOURCE
   data_view: chart
   panel_id: 9
-  deviation_threshold: 300
-  floor_value: 2.5
-  floor_op: ">"
+  deviation_threshold: "300%"
   description: "XCC system load stats"
   series_floor:
-    cpu_count: null   # constante (nº de CPUs da instância) — nunca alertar
-    # load_1m/load_5m/load_15m: sem entrada, ficam no floor_value:2.5 da
-    # métrica — já bem calibrado para os três (baseline max ~2.0)
+    cpu_count: null                    # constant (instance CPU count) — never alert
+    load_1m: {value: 2.5, op: ">"}     # baseline max ~2.0
+    load_5m: {value: 2.5, op: ">"}     # baseline max ~2.0
+    load_15m: {value: 2.5, op: ">"}    # baseline max ~2.0
 XCC CPU Usage per Process:
   status: active
   deviation: RESOURCE
   data_view: chart
   panel_id: 14
-  deviation_threshold: 300
-  floor_value: 15
+  deviation_threshold: "300%"
+  floor_value: "15%"
   floor_op: ">"
   description: "XCC CPU usage per process stats"
 XCC Memory Usage per Process:
@@ -119,8 +108,8 @@ XCC Memory Usage per Process:
   deviation: RESOURCE
   data_view: chart
   panel_id: 16
-  deviation_threshold: 300
-  floor_value: 2.5
+  deviation_threshold: "300%"
+  floor_value: "2.5%"
   floor_op: ">"
   description: "XCC memory usage per process stats"
 XCC Memory Usage:
@@ -128,25 +117,25 @@ XCC Memory Usage:
   deviation: RESOURCE
   data_view: chart
   panel_id: 4
-  deviation_threshold: 300
-  floor_value: 60
-  floor_op: ">"
+  deviation_threshold: "300%"
   description: "XCC memory usage stats"
   series_floor:
-    total: null              # constante (RAM total ~8GB)
-    active: 2000000000       # ~2GB, acima do p99.9 ~1.82GB
-    cache_buffers: 6300000000  # acima do p99.9 ~6.10GB
-    swap: 50000000            # sem dados históricos (0 séries em todas as regiões) — valor conservador
-    # free: sem entrada — floor_op ">" não serve para "alertar quando free é
-    # baixo" (limitação conhecida, ver README/plano); fica no floor_value:60
-    # da métrica (hoje inofensivo/no-op para esta série)
+    total: null                               # constant (total RAM ~8GB)
+    active: {value: "2GB", op: ">"}           # above p99.9 ~1.82GB
+    cache_buffers: {value: "6.3GB", op: ">"}  # above p99.9 ~6.10GB
+    swap: {value: "50MB", op: ">"}            # no historical data (0 series in any region) — conservative value
+    free: {value: "150MB", op: "<"}           # below the historical minimum ~174MB (eu-south-1, the only
+                                               # region with local cache). Deliberately conservative — this
+                                               # acts as a severe-drop alarm, not an early warning. Raise to
+                                               # ~180MB (near p0.1) for more sensitivity, or recalibrate once
+                                               # data from other regions is available.
 XCC Network IO:
   status: active
   deviation: RESOURCE
   data_view: chart
   panel_id: 10
-  deviation_threshold: 300
-  floor_value: 1000000
+  deviation_threshold: "300%"
+  floor_value: "1MB"
   floor_op: ">"
   description: "XCC network IO stats"
 XCC Number of File Handles:
@@ -154,9 +143,9 @@ XCC Number of File Handles:
   deviation: RESOURCE
   data_view: chart
   panel_id: 17
-  deviation_threshold: 300
-  # Interim estimate, sem dados históricos: ~80% de um ulimit -n comum (65536)
-  # tuned em instâncias de produção. Confirmar o ulimit real e ajustar.
+  deviation_threshold: "300%"
+  # Interim estimate, no historical data: ~80% of a common ulimit -n (65536)
+  # tuned on production instances. Confirm the real ulimit and adjust.
   floor_value: 50000
   floor_op: ">"
   description: "XCC number of file handles stats"
@@ -165,8 +154,8 @@ XCC Disk Usage:
   deviation: RESOURCE
   data_view: chart
   panel_id: 61
-  deviation_threshold: 300
-  floor_value: 80
+  deviation_threshold: "300%"
+  floor_value: "80%"
   floor_op: ">"
   description: "XCC disk usage stats"
 XCC TCP Connection Counters:
@@ -174,10 +163,10 @@ XCC TCP Connection Counters:
   deviation: RESOURCE
   data_view: chart
   panel_id: 8
-  deviation_threshold: 300
-  # Interim estimate, sem dados históricos: 1 milhão de ligações TCP
-  # simultâneas é implausível para este tipo de instância; ordem de grandeza
-  # a confirmar com o volume real observado no painel.
+  deviation_threshold: "300%"
+  # Interim estimate, no historical data: 1 million simultaneous TCP
+  # connections is implausible for this instance type; order of magnitude
+  # to confirm against the real volume observed on the panel.
   floor_value: 30000
   floor_op: ">"
   description: "XCC TCP connection counters stats"
@@ -186,11 +175,11 @@ XCC Core SHMem Max Used:
   deviation: RESOURCE
   data_view: chart
   panel_id: 6
-  deviation_threshold: 300
-  # Interim estimate, sem dados históricos: assume bytes; Kamailio -m
-  # tipicamente configurado entre 64MB e 1GB+, floor original (~1MB) ficava
-  # sempre abaixo do uso normal. Confirmar o -m real configurado e ajustar.
-  floor_value: 800000000
+  deviation_threshold: "300%"
+  # Interim estimate, no historical data: assumes bytes; Kamailio -m is
+  # typically configured between 64MB and 1GB+, the original floor (~1MB)
+  # always sat below normal usage. Confirm the real -m setting and adjust.
+  floor_value: "800MB"
   floor_op: ">"
   description: "XCC core SHMem max used stats"
 XCC RTPEngine Connection Failures:
@@ -198,11 +187,11 @@ XCC RTPEngine Connection Failures:
   deviation: RESOURCE
   data_view: chart
   panel_id: 68
-  deviation_threshold: 300
-  # Interim estimate, sem dados históricos: "falhas de ligação" deve alertar
-  # com contagens pequenas, não milhões. Se a query devolver um contador
-  # bruto/monotónico (não uma rate), este floor absoluto não é uma boa
-  # estratégia de deteção de qualquer forma — confirmar se usa rate()/irate().
+  deviation_threshold: "300%"
+  # Interim estimate, no historical data: "connection failures" should alert
+  # on small counts, not millions. If the query returns a raw/monotonic
+  # counter (not a rate), this absolute floor isn't a good detection
+  # strategy anyway — confirm whether rate()/irate() is used.
   floor_value: 50
   floor_op: ">"
   description: "XCC RTPEngine connection failures stats"

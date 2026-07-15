@@ -683,17 +683,66 @@ def detect_deviation(deviation_rule, values, deviation_threshold=None):
     return False, max(values), 0  # STATE / RESOURCE / free-text → floor only
 
 
-def resolve_series_floor(config, sub_label, floor_value):
-    """Per-series floor override: a metric block's 'series_floor' map (keyed by
-    normalize_series_key(sub_label)) maps a view name directly to its
-    floor_value, since a single floor is often not viable across sub-series
-    with very different baseline scales (e.g. CPU Stats' iowait vs
-    system/guest). A view can disable its floor entirely with an explicit
-    'null'; a view absent from the map falls back to the metric-level
-    floor_value."""
-    series_floor = config.get('series_floor') or {}
+_SIZE_UNIT_MULTIPLIERS = {
+    'kb': 1_000, 'mb': 1_000_000, 'gb': 1_000_000_000, 'tb': 1_000_000_000_000,
+}
+_HUMAN_VALUE_RE = re.compile(r'^([+-]?\d+(?:\.\d+)?)\s*([a-zA-Z%]*)$')
+
+
+def parse_human_value(value):
+    """Accepts a raw number (int/float/None, passed through unchanged) or a
+    human-readable string like '2GB', '50MB', '60%', '300%' and returns the
+    plain number the rest of the pipeline already expects: bytes for size
+    suffixes (decimal/SI: kb/mb/gb/tb), and the bare number for '%' (no /100
+    here — callers like detect_deviation_baseline already divide by 100,
+    matching how raw deviation_threshold/floor_value numbers work today)."""
+    if value is None or isinstance(value, (int, float)):
+        return value
+    if not isinstance(value, str):
+        return value
+    match = _HUMAN_VALUE_RE.match(value.strip())
+    if not match:
+        raise ValueError(f"cannot parse human-readable value: {value!r}")
+    number, unit = float(match.group(1)), match.group(2).lower()
+    if unit in ('', '%'):
+        return number
+    if unit in _SIZE_UNIT_MULTIPLIERS:
+        return number * _SIZE_UNIT_MULTIPLIERS[unit]
+    raise ValueError(f"unknown unit {unit!r} in human-readable value: {value!r}")
+
+
+_FLOOR_ENTRY_MISSING = object()  # sentinel: metric has 'series_floor' but no
+                                  # entry for this sub_label
+
+
+def resolve_series_floor_entry(config, sub_label, floor_value, floor_op):
+    """Resolve the (floor_value, floor_op) pair for one sub-query.
+
+    No 'series_floor' key: single scalar floor for the whole metric — returns
+    the metric-level (floor_value, floor_op) unchanged.
+
+    'series_floor' key present: per-series floor is mandatory, keyed by
+    normalize_series_key(sub_label) (e.g. CPU Stats' iowait vs system/guest,
+    which need very different scales). 'null' disables the floor for that
+    series entirely; {value, op} sets both explicitly. There is no silent
+    fallback to the metric-level floor here — that's what let a series like
+    Memory Usage's 'free' silently inherit a floor_op that could never fire
+    for it. A sub_label with no entry returns (_FLOOR_ENTRY_MISSING, None) so
+    the caller can warn and skip just that series instead of guessing."""
+    series_floor = config.get('series_floor')
+    if series_floor is None:
+        return parse_human_value(floor_value), floor_op
     key = normalize_series_key(sub_label)
-    return series_floor[key] if key in series_floor else floor_value
+    if key not in series_floor:
+        return _FLOOR_ENTRY_MISSING, None
+    entry = series_floor[key]
+    if entry is None:
+        return None, '>'  # disabled; op is unused since check_floor short-circuits on None
+    if not isinstance(entry, dict) or 'value' not in entry or 'op' not in entry:
+        raise ValueError(
+            f"series_floor entry for {key!r} must be null or "
+            f"{{value: ..., op: ...}}, got {entry!r}")
+    return parse_human_value(entry['value']), entry['op']
 
 
 def check_floor(floor_value, floor_op, values):
@@ -1036,8 +1085,8 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     """
     print(f"  checking {section} {metric_name} deviation", file=sys.stderr)
     deviation_rule = config.get('deviation', '')
-    deviation_threshold = config.get('deviation_threshold')
-    floor_value = config.get('floor_value')
+    deviation_threshold = parse_human_value(config.get('deviation_threshold'))
+    floor_value = parse_human_value(config.get('floor_value'))
     floor_op = config.get('floor_op', '>=')
     is_state = 'STATE' in deviation_rule
     is_spike = 'SPIKE' in deviation_rule.upper()
@@ -1150,14 +1199,23 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
 
     groups = []  # (sub_label, [ {instance, peak, timestamp, points} ])
     for sub_label, promql in resolved_queries:
+        # Per-series floor override: a single floor (value AND direction) is
+        # often not viable across sub-series with very different baseline
+        # scales or breach directions (e.g. Memory Usage's 'free' needs '<'
+        # while the rest of the metric needs '>') — see 'series_floor' in the
+        # metric's YAML config. Resolved before querying so a missing entry
+        # is caught without spending a Prometheus call on it.
+        eff_floor_value, eff_floor_op = resolve_series_floor_entry(
+            config, sub_label, floor_value, floor_op)
+        if eff_floor_value is _FLOOR_ENTRY_MISSING:
+            print(f"WARN: {section} {metric_name}: sub-query {sub_label!r} "
+                  f"(key {normalize_series_key(sub_label)!r}) has no series_floor "
+                  f"entry — skipping deviation detection for this series",
+                  file=sys.stderr)
+            continue
+
         print(f"  querying data to {section} {metric_name}", file=sys.stderr)
         res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
-
-        # Per-series floor override: a single floor is often not viable
-        # across sub-series with very different baseline scales (e.g. CPU
-        # Stats' iowait vs system/guest) — see 'series_floor' in the metric's
-        # YAML config.
-        eff_floor_value = resolve_series_floor(config, sub_label, floor_value)
 
         # SPIKE / RESOURCE-with-threshold: build a per-series seasonal baseline
         # model (day-of-week x hour-of-day median/MAD) from a local,
@@ -1196,11 +1254,11 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
             values = [v for _, v in points]
             # For floor_op that targets the lower end (<, ≤) use min to capture
             # the actual violation; otherwise use max (traditional peak).
-            if floor_op in ('<', '<='):
+            if eff_floor_op in ('<', '<='):
                 peak_ts, peak_val = min(points, key=lambda p: p[1])
             else:
                 peak_ts, peak_val = max(points, key=lambda p: p[1])
-            flagged_floor = check_floor(eff_floor_value, floor_op, values)
+            flagged_floor = check_floor(eff_floor_value, eff_floor_op, values)
             if is_spike:
                 key = frozenset(series.get('metric', {}).items())
                 model = baseline_models.get(key) or pooled_model
