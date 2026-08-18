@@ -41,6 +41,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import plot_helper
+from regions import REGION_TOKENS
 
 
 class GrafanaHTTPError(Exception):
@@ -367,19 +368,6 @@ def calculate_mad(values):
     return median, mad
 
 
-def detect_deviation_baseline(peak_val, model, threshold_pct):
-    """RESOURCE with deviation_threshold: flag if peak > baseline_median × (1 + threshold_pct/100).
-    threshold_pct of 300 means 4× the median.
-    Returns (flagged, baseline_median, decision_boundary)."""
-    if model is None or threshold_pct is None:
-        return False, 0, 0
-    baseline_median = model.get("global", {}).get("median", 0)
-    if baseline_median <= 0:
-        return False, 0, 0
-    decision_boundary = baseline_median * (1 + threshold_pct / 100.0)
-    return peak_val > decision_boundary, baseline_median, decision_boundary
-
-
 def detect_deviation_spike(values):
     """Rate/spike metrics: flag if max > median + 3*MAD.
     Returns (flagged, peak_val, spike_threshold)."""
@@ -694,7 +682,7 @@ def parse_human_value(value):
     human-readable string like '2GB', '50MB', '60%', '300%' and returns the
     plain number the rest of the pipeline already expects: bytes for size
     suffixes (decimal/SI: kb/mb/gb/tb), and the bare number for '%' (no /100
-    here — callers like detect_deviation_baseline already divide by 100,
+    here — callers dividing by a ceiling/percentage apply the /100 themselves,
     matching how raw deviation_threshold/floor_value numbers work today)."""
     if value is None or isinstance(value, (int, float)):
         return value
@@ -715,34 +703,131 @@ _FLOOR_ENTRY_MISSING = object()  # sentinel: metric has 'series_floor' but no
                                   # entry for this sub_label
 
 
-def resolve_series_floor_entry(config, sub_label, floor_value, floor_op):
+def _resolve_region_floor(region_floor_map, region, floor_value, floor_op):
+    """Apply an optional 'region_floor: {token: {value, op}}' override on top
+    of an already-resolved (floor_value, floor_op) pair. Sparse and opt-in:
+    a region with no entry (or no map at all) passes the default through
+    unchanged, so most metrics/regions never need this key at all."""
+    if not region_floor_map:
+        return parse_human_value(floor_value), floor_op
+    unknown = set(region_floor_map) - REGION_TOKENS
+    if unknown:
+        raise ValueError(
+            f"region_floor has unknown region token(s) {sorted(unknown)!r} — "
+            f"must be one of {sorted(REGION_TOKENS)!r}")
+    if region not in region_floor_map:
+        return parse_human_value(floor_value), floor_op
+    override = region_floor_map[region]
+    if not isinstance(override, dict) or 'value' not in override:
+        raise ValueError(
+            f"region_floor entry for {region!r} must be "
+            f"{{value: ...}} or {{value: ..., op: ...}}, got {override!r}")
+    return parse_human_value(override['value']), override.get('op', floor_op)
+
+
+def resolve_ceiling(ceiling_cfg, region=None):
+    """Resolve a metric-level 'ceiling' into a tagged (kind, value) pair used by
+    RESOURCE deviation (deviation_threshold = percentage of this ceiling):
+
+      - absent / falsy      -> ('none', None)
+      - {series: <key>}     -> ('series', <slugified key>)  point-by-point per
+                               instance against that panel series (per-region
+                               values come from the series itself)
+      - {value: <n>, ...}   -> ('scalar', <float>)  a manual capacity, with an
+                               optional nested 'region_floor: {token: {value}}'
+                               override applied for `region` exactly like a
+                               metric floor (same global-default + per-region
+                               behavior the user asked for).
+
+    'series' and 'value' are mutually exclusive; 'series' cannot carry a region
+    override (it already provides real per-region/per-instance values)."""
+    if not ceiling_cfg:
+        return ('none', None)
+    if not isinstance(ceiling_cfg, dict):
+        raise ValueError(f"ceiling must be a mapping, got {ceiling_cfg!r}")
+    has_series, has_value = 'series' in ceiling_cfg, 'value' in ceiling_cfg
+    if has_series == has_value:
+        raise ValueError("ceiling must have exactly one of 'series' or 'value'")
+    if has_series:
+        if ceiling_cfg.get('region_floor'):
+            raise ValueError("ceiling.series cannot carry a 'region_floor' override — "
+                             "the series already provides per-region values")
+        series_key = ceiling_cfg['series']
+        if not isinstance(series_key, str) or not series_key.strip():
+            raise ValueError(f"ceiling.series must be a non-empty series key, got {series_key!r}")
+        return ('series', slugify(series_key))
+    # scalar capacity with an optional per-region override. Same global-default +
+    # per-region shape as region_floor, but value-only (a ceiling has no op).
+    value = ceiling_cfg['value']
+    region_map = ceiling_cfg.get('region_floor')
+    if region_map:
+        unknown = set(region_map) - REGION_TOKENS
+        if unknown:
+            raise ValueError(
+                f"ceiling region_floor has unknown region token(s) {sorted(unknown)!r} — "
+                f"must be one of {sorted(REGION_TOKENS)!r}")
+        override = region_map.get(region)
+        if override is not None:
+            if not isinstance(override, dict) or 'value' not in override:
+                raise ValueError(
+                    f"ceiling region_floor entry for {region!r} must be {{value: ...}}, "
+                    f"got {override!r}")
+            value = override['value']
+    return ('scalar', parse_human_value(value))
+
+
+def resolve_series_floor_entry(config, sub_label, floor_value, floor_op, region=None):
     """Resolve the (floor_value, floor_op) pair for one sub-query.
 
     No 'series_floor' key: single scalar floor for the whole metric — returns
-    the metric-level (floor_value, floor_op) unchanged.
+    the metric-level (floor_value, floor_op), unless an optional metric-level
+    'region_floor: {token: {value, op}}' overrides it for this region.
 
     'series_floor' key present: per-series floor is mandatory, keyed by
     normalize_series_key(sub_label) (e.g. CPU Stats' iowait vs system/guest,
     which need very different scales). 'null' disables the floor for that
-    series entirely; {value, op} sets both explicitly. There is no silent
-    fallback to the metric-level floor here — that's what let a series like
-    Memory Usage's 'free' silently inherit a floor_op that could never fire
-    for it. A sub_label with no entry returns (_FLOOR_ENTRY_MISSING, None) so
-    the caller can warn and skip just that series instead of guessing."""
+    series entirely (regardless of region — a disabled series stays disabled
+    everywhere); {value, op} sets both explicitly, and that entry may itself
+    carry a 'region_floor' map for series whose baseline diverges by region.
+    There is no silent fallback to the metric-level floor here — that's what
+    let a series like Memory Usage's 'free' silently inherit a floor_op that
+    could never fire for it. A sub_label with no entry returns
+    (_FLOOR_ENTRY_MISSING, None, None) so the caller can warn and skip just that
+    series instead of guessing.
+
+    Returns a 3-tuple (floor_value, floor_op, ceiling_ref). ceiling_ref is the
+    slugified key of a sibling series when the entry uses 'of' or 'ceiling'
+    (e.g. {value: 10%, op: '<', of: total} → alert if this series < 10% of
+    'total', point-by-point per instance); None otherwise. In that case
+    floor_value carries the percentage, not an absolute floor."""
     series_floor = config.get('series_floor')
     if series_floor is None:
-        return parse_human_value(floor_value), floor_op
+        v, o = _resolve_region_floor(config.get('region_floor'), region, floor_value, floor_op)
+        return v, o, None
     key = normalize_series_key(sub_label)
     if key not in series_floor:
-        return _FLOOR_ENTRY_MISSING, None
+        return _FLOOR_ENTRY_MISSING, None, None
     entry = series_floor[key]
     if entry is None:
-        return None, '>'  # disabled; op is unused since check_floor short-circuits on None
+        return None, '>', None  # disabled; op is unused since check_floor short-circuits on None
     if not isinstance(entry, dict) or 'value' not in entry or 'op' not in entry:
         raise ValueError(
             f"series_floor entry for {key!r} must be null or "
             f"{{value: ..., op: ...}}, got {entry!r}")
-    return parse_human_value(entry['value']), entry['op']
+    ceiling_key = entry.get('ceiling') or entry.get('of')
+    if ceiling_key is not None:
+        if not isinstance(ceiling_key, str) or not ceiling_key.strip():
+            raise ValueError(
+                f"series_floor entry for {key!r} has invalid "
+                f"'ceiling'/'of': {ceiling_key!r}")
+        raw_val = entry['value']
+        if 'unit' in entry:
+            unit = entry['unit']
+            raw_val = f"{raw_val}{unit}" if unit and unit != '%' else raw_val
+        v, o = _resolve_region_floor(entry.get('region_floor'), region, raw_val, entry['op'])
+        return v, o, slugify(ceiling_key)
+    v, o = _resolve_region_floor(entry.get('region_floor'), region, entry['value'], entry['op'])
+    return v, o, None
 
 
 def check_floor(floor_value, floor_op, values):
@@ -757,6 +842,65 @@ def check_floor(floor_value, floor_op, values):
     if floor_op == '>=':
         return max(values) >= floor_value
     return max(values) >= floor_value  # >= (default)
+
+
+def check_ceiling_relative(points, op, pct, ceiling_map):
+    """Point-by-point per-instance check of a series against a ceiling series:
+    at each timestamp compute value/ceiling*100 and keep the worst ratio in the
+    `op` direction (max for '>'/'>=', min for '<'/'<='), then compare it to `pct`.
+
+    `ceiling_map` is {ts: ceiling_value} for the matching instance. Points with
+    no aligned ceiling value, or a non-positive ceiling, are skipped (no
+    divide-by-zero). Returns (flagged, breach_ts, breach_val, ref_at_breach),
+    where ref_at_breach = ceiling_at_breach * pct/100 is the decision boundary at
+    the worst point (a sensible chart reference line even when the ceiling drifts)."""
+    if pct is None or not ceiling_map:
+        return False, None, None, 0
+    lower = op in ('<', '<=')
+    worst = None  # (ratio, ts, val, ceil)
+    for ts, val in points:
+        ceil = ceiling_map.get(ts)
+        if ceil is None or ceil <= 0:
+            continue
+        ratio = val / ceil * 100.0
+        if worst is None or (ratio < worst[0] if lower else ratio > worst[0]):
+            worst = (ratio, ts, val, ceil)
+    if worst is None:
+        return False, None, None, 0
+    ratio, ts, val, ceil = worst
+    if op == '<':
+        flagged = ratio < pct
+    elif op == '<=':
+        flagged = ratio <= pct
+    elif op == '>=':
+        flagged = ratio >= pct
+    else:  # '>'
+        flagged = ratio > pct
+    return flagged, ts, val, ceil * pct / 100.0
+
+
+def build_ceiling_index(client, resolved_queries, ceiling_keys, start_ms, end_ms, region):
+    """For each referenced ceiling key, locate the matching sub-query (by
+    normalize_series_key), query it once, and index its points by instance:
+    {key: {instance_key: {ts: value}}}. Raises ValueError if a key matches no
+    sub-query in the metric (config points at a series the panel doesn't produce)."""
+    index = {}
+    for key in ceiling_keys:
+        promql = next((q for sl, q in resolved_queries if normalize_series_key(sl) == key), None)
+        if promql is None:
+            raise ValueError(
+                f"ceiling reference {key!r} matches no series/sub-query in this metric")
+        res = query_prometheus(client, promql, start_ms, end_ms, region)
+        inst_map = {}
+        for series in res.get('data', {}).get('result', []):
+            pts = series_points(series)
+            if not pts:
+                continue
+            metric = series.get('metric', {})
+            inst = metric.get('instance') or series_label(metric)
+            inst_map.setdefault(inst, {}).update({ts: v for ts, v in pts})
+        index[key] = inst_map
+    return index
 
 
 def series_label(metric):
@@ -784,6 +928,25 @@ def series_points(series):
 def format_timestamp(epoch_s):
     """Convert a Prometheus timestamp (Unix epoch seconds) to ISO format."""
     return datetime.fromtimestamp(float(epoch_s), tz=timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
+
+
+def format_value(value, unit):
+    if not unit:
+        return f"{value:.2f}"
+    u = unit.lower()
+    is_rate = 'ps' in u or '/s' in u
+    is_bit = unit == 'bps'
+    if u in ('bytes', 'byte', 'b', 'decbytes', 'decbyte',
+             'bps', 'decbps',
+             'bytes/s', 'bytes/sec', 'b/s'):
+        base = 'b' if is_bit else 'B'
+        for suf, div in [('G', 1e9), ('M', 1e6), ('K', 1e3)]:
+            if abs(value) >= div:
+                return f"{value/div:.2f} {suf}{base}{'/s' if is_rate else ''}"
+        return f"{value:.2f} {unit}"
+    if u in ('percent', '%', 'percentunit'):
+        return f"{value:.2f}{'%' if u != 'percentunit' else ''}"
+    return f"{value:.2f} {unit}"
 
 
 def build_grafana_url(base_url, region, start_ms, end_ms):
@@ -847,26 +1010,46 @@ def fill_state_gaps(deviated):
     return deviated
 
 
-def summarize_state_transitions(points):
-    """Count 0->1 (starts) and 1->0 (terminates) transitions in a gap-filled
-    up/down series. Returns (starts, terminates, first_change_ts).
+def fill_prometheus_gaps(result):
+    """Pre-detection gap fill for state metrics. Prometheus doesn't emit 0
+    when a target is down — it stops emitting samples. This fills in 0.0 at
+    every union-grid timestamp a series is missing so check_floor(min < 1)
+    can detect down instances. Mutates result in place."""
+    series_list = result.get('data', {}).get('result', [])
+    if not series_list:
+        return
+    all_ts = set()
+    for series in series_list:
+        for ts, _ in series_points(series):
+            all_ts.add(ts)
+    if not all_ts:
+        return
+    grid = sorted(all_ts)
+    for series in series_list:
+        present = {}
+        for ts_str, val_str in series.get('values', []):
+            present[float(ts_str)] = val_str
+        filled = []
+        for ts in grid:
+            if ts in present:
+                filled.append([str(ts), present[ts]])
+            else:
+                filled.append([str(ts), "0"])
+        series['values'] = filled
 
-    An instance that is up for the whole window has no transition (its expected
-    initial up value is never counted as an event)."""
-    starts = terminates = 0
-    first_change_ts = None
+
+def summarize_state_transitions(points):
+    """List individual terminated(1→0) / started(0→1) events in a gap-filled
+    up/down series. Returns [(event_type, timestamp_s), ...] in chronological
+    order. Empty list = no transitions (all-up)."""
+    events = []
     prev_up = None
     for ts, val in points:
         up = val >= 0.5
         if prev_up is not None and up != prev_up:
-            if up:
-                starts += 1
-            else:
-                terminates += 1
-            if first_change_ts is None:
-                first_change_ts = ts
+            events.append(('terminated' if not up else 'started', ts))
         prev_up = up
-    return starts, terminates, first_change_ts
+    return events
 
 
 def generate_chart(title, out_path, unit, payload, render_cfg=None):
@@ -927,7 +1110,9 @@ def extract_panel_queries(dashboard_json, panel_id):
                 # (and misleading) here — strip it rather than leave it literal.
                 label = re.sub(r'\{\{.*?\}\}', '', label).strip().lstrip('-–').strip()
                 label = label or t.get("refId", "?")  # legendFormat was only a template token
-                queries.append((f"{t.get('refId', '?')} — {label}", t["expr"]))
+                sub_label = (f"{t.get('refId', '?')} — {label}"
+                             if label != t.get("refId", "?") else "")
+                queries.append((sub_label, t["expr"]))
             return queries
     raise KeyError(f"panel {panel_id} not found")
 
@@ -1084,19 +1269,77 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     affected series until the gap is backfilled on a later run.
     """
     print(f"  checking {section} {metric_name} deviation", file=sys.stderr)
+
+    # Expand unified `threshold:` block into legacy fields (floor_value,
+    # floor_op, ceiling, deviation_threshold) so the rest of the pipeline
+    # needs no changes.  Handles:
+    #   STATE:  {value: 1, op: "<"}  → deviation: STATE, floor_value: 1, floor_op: <
+    #   RESOURCE (ceiling-relative): {value: 40, unit: "%", op: ">", ceiling: 100}
+    #            → deviation: RESOURCE, ceiling: {value: 100}, deviation_threshold: 40
+    #   RESOURCE (absolute floor):   {value: 2.5, op: ">"}
+    #            → deviation: RESOURCE, floor_value: 2.5, floor_op: >
+    # Metrics with series_floor or SPIKE keep their current fields unchanged
+    # (threshold block is ignored for them).
+    threshold = config.get('threshold')
+    if threshold and isinstance(threshold, dict):
+        value = threshold.get('value')
+        op = threshold.get('op', '>=')
+        ceiling_val = threshold.get('ceiling')
+        unit = threshold.get('unit', '')
+        # Reconstruct a string like "1MB" so parse_human_value() converts to
+        # bytes.  % and bare numbers are passed as-is (parse_human_value treats
+        # them identically to int/float).
+        raw = f"{value}{unit}" if unit and unit != '%' else value
+        if ceiling_val is not None:
+            config['ceiling'] = {'value': ceiling_val}
+            config['deviation_threshold'] = raw if isinstance(raw, str) else value
+            config['deviation'] = 'RESOURCE'
+            config.pop('floor_value', None)
+            config.pop('floor_op', None)
+        elif value == 1 and op == '<':
+            config['deviation'] = config.get('deviation', 'STATE')
+            config['floor_value'] = 1
+            config['floor_op'] = '<'
+        else:
+            config['deviation'] = config.get('deviation', 'RESOURCE')
+            config['floor_value'] = raw
+            config['floor_op'] = op
+
     deviation_rule = config.get('deviation', '')
     deviation_threshold = parse_human_value(config.get('deviation_threshold'))
     floor_value = parse_human_value(config.get('floor_value'))
     floor_op = config.get('floor_op', '>=')
+    ceiling_kind, ceiling_ref = resolve_ceiling(config.get('ceiling'), region)
     is_state = 'STATE' in deviation_rule
     is_spike = 'SPIKE' in deviation_rule.upper()
-    is_resource = 'RESOURCE' in deviation_rule.upper() and deviation_threshold is not None
+    # RESOURCE deviation is ceiling-relative: 'deviation_threshold' is a percentage
+    # of the metric's 'ceiling' (a manual capacity or a panel series), evaluated on
+    # the current window — no historical baseline. It needs both to mean anything.
+    is_resource = ('RESOURCE' in deviation_rule.upper()
+                   and deviation_threshold is not None
+                   and ceiling_kind != 'none')
+    if ('RESOURCE' in deviation_rule.upper() and deviation_threshold is not None
+            and ceiling_kind == 'none'):
+        print(f"WARN: {section} {metric_name}: RESOURCE deviation_threshold set but no "
+              f"'ceiling' defined — ignoring threshold, running floor-only", file=sys.stderr)
     baseline_weeks = config.get('baseline_weeks', BASELINE_WEEKS_DEFAULT)
     band_k = config.get('band_k', BAND_K_DEFAULT)
     baseline_start_ms = start_epoch_ms - baseline_weeks * 7 * 24 * 3600 * 1000
     baseline_end_ms = start_epoch_ms
     metric_slug = slugify(metric_name)
     data_view = config.get('data_view', 'chart')
+
+    # Save the original sprint-end before capping so the overview chart's
+    # x-axis can span the full sprint window even when data starts mid-sprint.
+    sprint_end_ms = end_epoch_ms
+    # Cap end_epoch_ms to now — never query Prometheus for future data.
+    # Without this cap, step timestamps extend past current time (up to
+    # end-of-day). At those steps, different instances may have slightly
+    # different last scrape timestamps, creating false 1→0 transitions
+    # when fill_prometheus_gaps fills missing grid timestamps with 0.
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if end_epoch_ms > now_ms:
+        end_epoch_ms = now_ms
 
     # Resolve dashboard uid + panel
     panel_id = config.get('panel_id')
@@ -1115,6 +1358,11 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     render_overrides = config.get('render')
     if render_overrides:
         render_cfg = {**render_cfg, **render_overrides}
+    # STATE metrics always use state-style charts (gap-fill, step plot,
+    # transition-based reporting). Auto-derive from deviation so YAML
+    # doesn't need redundant `render: {style: state}`.
+    if 'STATE' in config.get('deviation', '').upper():
+        render_cfg.setdefault('style', 'state')
     # 'state' style = per-instance up/down chart (down gap-filled to 0, no
     # reference line, transition-based reporting instead of peak framing).
     chart_style = render_cfg.get('style')
@@ -1197,34 +1445,85 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                                           start_epoch_ms, end_epoch_ms,
                                           region, section)
 
+    # Ceiling references (metric-level series ceiling + per-series 'of'/'ceiling')
+    # need the referenced series' points, indexed by instance, before we can
+    # evaluate the dependent series against them. Built once, one extra query per
+    # referenced ceiling. Scalar ceilings need no query (constant capacity).
+    ceiling_keys = set()
+    if ceiling_kind == 'series':
+        ceiling_keys.add(ceiling_ref)
+    for _entry in (config.get('series_floor') or {}).values():
+        if isinstance(_entry, dict):
+            _ck = _entry.get('ceiling') or _entry.get('of')
+            if _ck:
+                ceiling_keys.add(slugify(_ck))
+    ceiling_index = (build_ceiling_index(client, resolved_queries, ceiling_keys,
+                                         start_epoch_ms, end_epoch_ms, region)
+                     if ceiling_keys else {})
+
     groups = []  # (sub_label, [ {instance, peak, timestamp, points} ])
     for sub_label, promql in resolved_queries:
+        sub_key = normalize_series_key(sub_label)
         # Per-series floor override: a single floor (value AND direction) is
         # often not viable across sub-series with very different baseline
         # scales or breach directions (e.g. Memory Usage's 'free' needs '<'
         # while the rest of the metric needs '>') — see 'series_floor' in the
         # metric's YAML config. Resolved before querying so a missing entry
         # is caught without spending a Prometheus call on it.
-        eff_floor_value, eff_floor_op = resolve_series_floor_entry(
-            config, sub_label, floor_value, floor_op)
-        if eff_floor_value is _FLOOR_ENTRY_MISSING:
-            print(f"WARN: {section} {metric_name}: sub-query {sub_label!r} "
-                  f"(key {normalize_series_key(sub_label)!r}) has no series_floor "
-                  f"entry — skipping deviation detection for this series",
-                  file=sys.stderr)
-            continue
+        eff_floor_value, eff_floor_op, entry_ceiling_ref = resolve_series_floor_entry(
+            config, sub_label, floor_value, floor_op, region=region)
+
+        # Decide this series' effective check(s):
+        #   abs_floor_*     -> absolute floor via check_floor (None = no floor)
+        #   ser_ceiling_*   -> point-by-point ratio vs a ceiling series
+        #   scalar_boundary -> absolute boundary from a scalar (manual) ceiling
+        abs_floor_value, abs_floor_op = eff_floor_value, eff_floor_op
+        ser_ceiling_ref = ser_ceiling_pct = None
+        ser_ceiling_op = '>'
+        scalar_boundary = None
+        is_ceiling_series = (ceiling_kind == 'series' and sub_key == ceiling_ref)
+        entry_missing = eff_floor_value is _FLOOR_ENTRY_MISSING
+
+        if entry_ceiling_ref is not None:
+            # Per-series 'ceiling'/'of': the entry value is a percentage of that series.
+            ser_ceiling_ref, ser_ceiling_pct, ser_ceiling_op = (
+                entry_ceiling_ref, eff_floor_value, eff_floor_op)
+            abs_floor_value, abs_floor_op = None, '>'
+        elif entry_missing:
+            # No per-series entry. Inherit the metric-level ceiling default for a
+            # RESOURCE metric (below); otherwise keep the strict skip behavior.
+            if not (is_resource and not is_ceiling_series):
+                print(f"WARN: {section} {metric_name}: sub-query {sub_label!r} "
+                      f"(key {sub_key!r}) has no series_floor entry — skipping "
+                      f"deviation detection for this series", file=sys.stderr)
+                continue
+            abs_floor_value, abs_floor_op = None, '>'
+
+        # Metric-level ceiling default: applies to a non-ceiling series that has
+        # no explicit ceiling override of its own — either a missing series_floor
+        # entry, or a metric with no series_floor block at all. An explicit
+        # {value, op} or null entry overrides it (as region_floor overrides a
+        # metric default).
+        if (is_resource and not is_ceiling_series and ser_ceiling_ref is None
+                and (entry_missing or config.get('series_floor') is None)):
+            if ceiling_kind == 'series':
+                ser_ceiling_ref, ser_ceiling_pct, ser_ceiling_op = (
+                    ceiling_ref, deviation_threshold, '>')
+            elif ceiling_kind == 'scalar':
+                scalar_boundary = ceiling_ref * deviation_threshold / 100.0
 
         print(f"  querying data to {section} {metric_name}", file=sys.stderr)
         res = query_prometheus(client, promql, start_epoch_ms, end_epoch_ms, region)
+        if chart_style == 'state':
+            fill_prometheus_gaps(res)
 
-        # SPIKE / RESOURCE-with-threshold: build a per-series seasonal baseline
-        # model (day-of-week x hour-of-day median/MAD) from a local,
-        # incrementally-updated cache of baseline_weeks..now history.
-        # SPIKE uses the full bucket model for seasonal bounds; RESOURCE uses
-        # the global median for a relative peak-over-baseline check.
+        # SPIKE: build a per-series seasonal baseline model (day-of-week x
+        # hour-of-day median/MAD) from a local, incrementally-updated cache of
+        # baseline_weeks..now history, used for seasonal bounds. RESOURCE no
+        # longer uses any baseline — it is ceiling-relative on the current window.
         baseline_models = {}
         pooled_model = None
-        if is_spike or is_resource:
+        if is_spike:
             cache_path = _cache_path(section, metric_slug, region, sub_label)
             baseline_res = fetch_baseline_points_cached(
                 client, cache_path, promql, baseline_start_ms, baseline_end_ms, region,
@@ -1247,32 +1546,60 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 pooled_model = build_seasonal_baseline(all_baseline_points, baseline_weeks)
 
         deviated = []
+        all_series_data = []  # (instance_label, points, flagged)
         for series in res.get('data', {}).get('result', []):
             points = series_points(series)
             if not points:
                 continue
             values = [v for _, v in points]
-            # For floor_op that targets the lower end (<, ≤) use min to capture
-            # the actual violation; otherwise use max (traditional peak).
-            if eff_floor_op in ('<', '<='):
+            # Peak direction follows whichever check drives this series: for a
+            # lower-end op (<, ≤) use min to capture the actual violation;
+            # otherwise use max (traditional peak).
+            active_op = ser_ceiling_op if ser_ceiling_ref else abs_floor_op
+            if active_op in ('<', '<='):
                 peak_ts, peak_val = min(points, key=lambda p: p[1])
             else:
                 peak_ts, peak_val = max(points, key=lambda p: p[1])
-            flagged_floor = check_floor(eff_floor_value, eff_floor_op, values)
+
+            flagged_floor = check_floor(abs_floor_value, abs_floor_op, values)
+
+            # Ceiling-relative check (metric series ceiling or per-series 'ceiling'/'of').
+            flagged_ceiling = False
+            ceil_threshold = 0
+            if ser_ceiling_ref is not None:
+                metric_labels = series.get('metric', {})
+                inst = metric_labels.get('instance') or series_label(metric_labels)
+                cmap = ceiling_index.get(ser_ceiling_ref, {}).get(inst)
+                if cmap is None:
+                    print(f"WARN: {section} {metric_name}: {sub_label!r} instance "
+                          f"{inst!r} has no matching {ser_ceiling_ref!r} ceiling series "
+                          f"— skipping ceiling check", file=sys.stderr)
+                else:
+                    flagged_ceiling, b_ts, b_val, ceil_threshold = check_ceiling_relative(
+                        points, ser_ceiling_op, ser_ceiling_pct, cmap)
+                    if flagged_ceiling:
+                        peak_ts, peak_val = b_ts, b_val
+            elif scalar_boundary is not None:
+                flagged_ceiling = max(values) > scalar_boundary
+                ceil_threshold = scalar_boundary
+
+            flagged_dev = False
+            dev_threshold = 0
+            model = None
             if is_spike:
                 key = frozenset(series.get('metric', {}).items())
                 model = baseline_models.get(key) or pooled_model
                 flagged_dev, dev_threshold = detect_deviation_seasonal(peak_val, peak_ts, model, band_k)
-            elif is_resource:
-                key = frozenset(series.get('metric', {}).items())
-                model = baseline_models.get(key) or pooled_model
-                flagged_dev, _, dev_threshold = detect_deviation_baseline(peak_val, model, deviation_threshold)
-            else:
+            elif not is_resource:
                 flagged_dev, _, dev_threshold = detect_deviation(deviation_rule, values, deviation_threshold)
-            flagged = flagged_floor or flagged_dev
+
+            flagged = flagged_floor or flagged_ceiling or flagged_dev
+            all_series_data.append((series_label(series.get('metric', {})), points, flagged))
             # Reference threshold: the actual decision boundary that triggered.
-            if flagged_floor and eff_floor_value is not None:
-                ref_threshold = eff_floor_value
+            if flagged_floor and abs_floor_value is not None:
+                ref_threshold = abs_floor_value
+            elif flagged_ceiling and ceil_threshold:
+                ref_threshold = ceil_threshold
             elif flagged_dev and dev_threshold:
                 ref_threshold = dev_threshold
             else:
@@ -1288,9 +1615,21 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                     "timestamp": peak_ts,
                     "points": points,
                     "threshold": ref_threshold,
+                    "op": active_op,
                 })
         if deviated:
-            groups.append((sub_label, deviated))
+            groups.append((sub_label, deviated, all_series_data))
+
+    seen = set()
+    deduped = []
+    for sub_label, deviated, all_series_data in groups:
+        key = frozenset((d["instance"], round(d["peak"], 2), round(d["timestamp"] or 0, 0)) for d in deviated)
+        if key not in seen:
+            seen.add(key)
+            deduped.append((sub_label, deviated, all_series_data))
+        else:
+            print(f"  dedup {section} {metric_name}: {sub_label!r} matches previous group", file=sys.stderr)
+    groups = deduped
 
     if not groups:
         print(f"  done {section} {metric_name} (no deviation)", file=sys.stderr)
@@ -1299,48 +1638,53 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
     print(f"  building {section} {metric_name}", file=sys.stderr)
 
     html_output = ""
-    for sub_label, deviated in groups:
-        title = metric_name if not sub_label else f"{metric_name} — {sub_label}"
+    for sub_label, deviated, all_series_data in groups:
+        display_label = SUBQUERY_KEY.sub('', sub_label).strip() if sub_label else ''
+        title = metric_name if not display_label else f"{metric_name} — {display_label}"
 
         if chart_style == 'state':
             # Up/down state: gap-fill down=0, report transitions (not a "peak").
             fill_state_gaps(deviated)
-            summaries = [(dev, *summarize_state_transitions(dev['points'])) for dev in deviated]
-            # No chart unless at least one instance actually went down (1->0).
-            # All-up-the-whole-sprint = no deviation, nothing to show.
-            if not any(terminates for _dev, _starts, terminates, _ts in summaries):
+            if not any(
+                event == 'terminated'
+                for dev in deviated
+                for event, _ in summarize_state_transitions(dev['points'])
+            ):
                 print(f"  no restart/terminate for {section} {metric_name}, skipping chart",
                       file=sys.stderr)
                 continue
             html_output += f"<p><strong>{title} — instance up/down</strong></p>\n"
             html_output += '<ul>\n'
-            for dev, starts, terminates, change_ts in summaries:
-                if starts or terminates:
-                    ts_str = format_timestamp(change_ts) if change_ts else "N/A"
-                    parts = []
-                    if terminates:
-                        parts.append(f"{terminates} terminate(s)")
-                    if starts:
-                        parts.append(f"{starts} start(s)")
-                    html_output += f'  <li>{dev["instance"]}: {", ".join(parts)} (first change at {ts_str})</li>\n'
+            for dev in deviated:
+                events = summarize_state_transitions(dev['points'])
+                if events:
+                    li_content = f'{dev["instance"]}:'
+                    for event, ts in events:
+                        ts_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%b %d, %H:%M')
+                        li_content += f'<br>  {event} - {ts_str}'
+                    html_output += f'  <li>{li_content}</li>\n'
                 else:
                     html_output += f'  <li>{dev["instance"]}: up (stable)</li>\n'
             html_output += '</ul>\n'
         else:
             reference = deviated[0].get('threshold', deviated[0]['peak'])
             html_output += f"<p><strong>{title} deviation detected</strong></p>\n"
-            html_output += f"<p>Reference = {reference:.2f} {unit}</p>\n"
+            html_output += f"<p>Reference = {format_value(reference, unit)}</p>\n"
             if data_view == 'table':
                 html_output += '<table><tr><th>Instance</th><th>Value</th><th>Timestamp (UTC)</th></tr>\n'
                 for dev in deviated:
                     timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
-                    html_output += f'<tr><td>{dev["instance"]}</td><td>{dev["peak"]:.2f} {unit}</td><td>{timestamp_str}</td></tr>\n'
+                    html_output += f'<tr><td>{dev["instance"]}</td><td>{format_value(dev["peak"], unit)}</td><td>{timestamp_str}</td></tr>\n'
                 html_output += '</table>\n'
             else:
                 html_output += '<ul>\n'
                 for dev in deviated:
                     timestamp_str = format_timestamp(dev['timestamp']) if dev['timestamp'] else "N/A"
-                    html_output += f'  <li>{dev["instance"]}: peak {dev["peak"]:.2f} {unit} at {timestamp_str}</li>\n'
+                    val_text = format_value(dev["peak"], unit)
+                    if dev.get("op", ">") in ('<', '<='):
+                        html_output += f'  <li>{dev["instance"]}: {val_text} at {timestamp_str}</li>\n'
+                    else:
+                        html_output += f'  <li>{dev["instance"]}: peak {val_text} at {timestamp_str}</li>\n'
                 html_output += '</ul>\n'
 
         if data_view == 'list' or data_view == 'table':
@@ -1350,13 +1694,17 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
         region_tag = region or "all"
 
         overview_payload = {
-            "lines": [{"label": dev["instance"], "points": format_points(dev["points"])} for dev in deviated],
+            "lines": [{"label": label, "points": format_points(pts), "deviated": flagged}
+                      for label, pts, flagged in all_series_data],
         }
         if chart_style != 'state':
             # State charts have no meaningful reference line (down=0, up=1).
             overview_payload["threshold"] = {"label": "Reference", "value": reference}
         overview_path = os.path.join(OUTPUT_DIR, f"chart_{region_tag}_{group_slug}.png")
-        if generate_chart(title, overview_path, unit, overview_payload, render_cfg):
+        overview_cfg = {**render_cfg} if render_cfg else {}
+        overview_cfg['x_min'] = datetime.fromtimestamp(start_epoch_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M')
+        overview_cfg['x_max'] = datetime.fromtimestamp(sprint_end_ms / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M')
+        if generate_chart(title, overview_path, unit, overview_payload, overview_cfg):
             html_output += (
                 f'<ac:image ac:align="center" ac:width="950">'
                 f'<ri:attachment ri:filename="{os.path.basename(overview_path)}"/></ac:image>\n'
@@ -1367,16 +1715,27 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
             # not just the first instance's — otherwise instances whose peak
             # lands far from deviated[0]'s get silently dropped from the zoom
             # even though they're clearly visible (and flagged) in the overview.
+            # For STATE metrics, transitions are used instead of dev['timestamp']
+            # (which is the min value point and lands at the sprint boundary
+            # for gap-filled instances that started mid-sprint).
             if data_view == 'chart':
-                margin_s = 1800
-                peak_timestamps = [dev['timestamp'] for dev in deviated]
-                zoom_start = min(peak_timestamps) - margin_s
-                zoom_end = max(peak_timestamps) + margin_s
+                margin_s = 7200  # 2h margin
+                if chart_style == 'state':
+                    zoom_timestamps = [
+                        ts for dev in deviated
+                        for _, ts in summarize_state_transitions(dev['points'])
+                    ]
+                    if not zoom_timestamps:
+                        continue
+                else:
+                    zoom_timestamps = [dev['timestamp'] for dev in deviated]
+                zoom_start = min(zoom_timestamps) - margin_s
+                zoom_end = max(zoom_timestamps) + margin_s
                 zoom_lines = []
-                for dev in deviated:
-                    zoomed = slice_zoom(dev['points'], zoom_start, zoom_end)
+                for label, pts, flagged in all_series_data:
+                    zoomed = slice_zoom(pts, zoom_start, zoom_end)
                     if len(zoomed) >= 3:
-                        zoom_lines.append({"label": dev["instance"], "points": format_points(zoomed)})
+                        zoom_lines.append({"label": label, "points": format_points(zoomed), "deviated": flagged})
                 if zoom_lines:
                     zoom_payload = {"lines": zoom_lines}
                     if chart_style != 'state':

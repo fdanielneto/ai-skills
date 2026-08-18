@@ -1,26 +1,12 @@
 defaults:
   dashboard: xconnect_dashboard_v3
 
-XCC Alive:
+XCC Alive: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-1 xcc-metrics xcc-alive
   status: active
-  deviation: STATE
-  data_view: chart_not_zoom
+  data_view: chart
   panel_id: 22
-  floor_value: 1
-  floor_op: "<"
+  threshold: {value: 1, op: "<"}
   description: "XCC alive stats by XCC instance (up/down status)"
-XCC Instance Restarts:
-  status: active
-  deviation: STATE
-  data_view: chart_not_zoom
-  expr: present_over_time(process_start_time_seconds{region="$region",role="edgerouter",service="XCC"}[5m])
-  floor_value: 0
-  floor_op: ">"
-  description: "Kamailio instance up/down per instance (1=up, 0=down). Terminate = a line drops 1->0; start = a line rises 0->1. Restart = one instance drops while another rises."
-  render:
-    min: 0
-    max: 2
-    style: state
 Error Rates (Spikes) - By Instance:
   status: active
   deviation: SPIKE
@@ -28,10 +14,26 @@ Error Rates (Spikes) - By Instance:
   panel_id: 800
   description: "XCC error rates (spikes) by XCC instance"
   series_floor:
-    total_error_rate: {value: 3, op: ">"}    # above the max observed per instance ~2.40
-    "4xx_rate": {value: 2.5, op: ">"}        # above p99.9 ~1.55
-    "5xx_rate": {value: 1.5, op: ">"}        # above p99.9 ~0.94
-    "6xx_rate": {value: 0.1, op: ">"}        # above p99.9 ~0.034 (6xx should be extremely rare)
+    total_error_rate:
+      value: 2
+      op: ">"
+      region_floor:
+        ap-southeast-1: {value: 4, op: ">"}
+        ap-southeast-2: {value: 4, op: ">"}
+    "4xx_rate":
+      value: 2.5
+      op: ">"
+      region_floor:
+        ap-southeast-1: {value: 8.25, op: ">"}
+        ap-southeast-2: {value: 8.35, op: ">"}
+    "5xx_rate":
+      value: 1.5
+      op: ">"
+      region_floor:
+        eu-west-3: {value: 1.6, op: ">"}
+    "6xx_rate":
+      value: 0.1
+      op: ">"
 Custom Metrics Rates (Spikes) - By Instance:
   status: active
   deviation: SPIKE
@@ -39,12 +41,20 @@ Custom Metrics Rates (Spikes) - By Instance:
   panel_id: 801
   description: "XCC custom metrics rates (spikes) by XCC instance"
   series_floor:
-    emergency_invites_rate: {value: 5, op: ">"}   # no historical data (0 series) — conservative value
-    inbound_invites_rate: {value: 4, op: ">"}     # above p99.9 ~2.87
-    outbound_offnet_rate: {value: 6, op: ">"}     # above p99.9 ~4.86
-    outbound_onnet_rate: {value: 0.05, op: ">"}   # above p99.9 ~0.008
-    rtpengine_failure_rate: {value: 0.1, op: ">"} # above p99.9 ~0.008
-    siprec_calls_rate: {value: 5, op: ">"}        # no historical data — conservative value
+    emergency_invites_rate: {value: 5, op: ">"}
+    inbound_invites_rate:
+      value: 4
+      op: ">"
+      region_floor:
+        eu-south-1: {value: 4.5, op: ">"}
+    outbound_offnet_rate:
+      value: 6
+      op: ">"
+      region_floor:
+        eu-south-1: {value: 7.5, op: ">"}
+    outbound_onnet_rate: {value: 0.05, op: ">"}
+    rtpengine_failure_rate: {value: 0.1, op: ">"}
+    siprec_calls_rate: {value: 5, op: ">"}
 Custom Metrics Rates (Spikes):
   status: active
   deviation: SPIKE
@@ -52,13 +62,13 @@ Custom Metrics Rates (Spikes):
   panel_id: 232
   description: "XCC custom metrics rates (spikes)"
   series_floor:
-    total_custom_rate: {value: 20, op: ">"}                  # no historical data (0 series) — keeps the metric's floor
-    emergency_invites_rate: {value: 5, op: ">"}               # no historical data (0 series) — conservative value
-    inbound_invites_rate: {value: 9, op: ">"}                 # above p99.9 ~8.03
-    outbound_offnet_invites_rate: {value: 11, op: ">"}        # above p99.9 ~8.66
-    outbound_onnet_invites_rate: {value: 0.05, op: ">"}       # above p99.9 ~0.012 (near-zero baseline)
-    rtpengine_connection_failure_rate: {value: 0.1, op: ">"}  # above p99.9 ~0.010
-    siprec_calls_rate: {value: 5, op: ">"}                    # no historical data (0 series) — conservative value
+    total_custom_rate: {value: 20, op: ">"}
+    emergency_invites_rate: {value: 5, op: ">"}
+    inbound_invites_rate: {value: 9, op: ">"}
+    outbound_offnet_invites_rate: {value: 11, op: ">"}
+    outbound_onnet_invites_rate: {value: 0.05, op: ">"}
+    rtpengine_connection_failure_rate: {value: 0.1, op: ">"}
+    siprec_calls_rate: {value: 5, op: ">"}
 Error Rates (Spikes):
   status: active
   deviation: SPIKE
@@ -66,132 +76,87 @@ Error Rates (Spikes):
   panel_id: 231
   description: "XCC error rates (spikes)"
   series_floor:
-    total_error_rate: {value: 6, op: ">"}    # above the observed max ~5.25
-    "4xx_rate": {value: 3, op: ">"}          # above p99.9 ~2.81
-    "5xx_rate": {value: 2, op: ">"}          # above p99.9 ~1.92
-    "6xx_rate": {value: 0.15, op: ">"}       # above p99.9 ~0.058 (6xx should be extremely rare)
-XCC CPU Stats:
+    total_error_rate: {value: 6, op: ">"}
+    "4xx_rate": {value: 3, op: ">"}
+    "5xx_rate": {value: 2, op: ">"}
+    "6xx_rate": {value: 0.15, op: ">"}
+XCC CPU Stats: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-1 xcc-metrics xcc-cpu-stats
   status: active
   deviation: RESOURCE
   data_view: chart
   panel_id: 11
-  deviation_threshold: "300%"
+  threshold: {value: 20, unit: "%", op: ">", ceiling: 100}
   description: "XCC CPU stats"
-  series_floor:
-    user: {value: 3, op: ">"}      # no historical data (query "A — User" never returned series); kept consistent with 'system' as a precaution
-    system: {value: 3, op: ">"}    # baseline p99.9 ~0.77, max ~1.0
-    iowait: {value: 1, op: ">"}    # baseline p99.9 ~0.21, max ~0.26
-    guest: {value: 1, op: ">"}     # baseline always 0
-XCC System Load:
+XCC System Load:  # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-1 xcc-metrics xcc-system-load
   status: active
   deviation: RESOURCE
   data_view: chart
   panel_id: 9
-  deviation_threshold: "300%"
-  description: "XCC system load stats"
+  deviation_threshold: "60%"
+  ceiling: {series: cpu_count}
   series_floor:
-    cpu_count: null                    # constant (instance CPU count) — never alert
-    load_1m: {value: 2.5, op: ">"}     # baseline max ~2.0
-    load_5m: {value: 2.5, op: ">"}     # baseline max ~2.0
-    load_15m: {value: 2.5, op: ">"}    # baseline max ~2.0
+    cpu_count: null
+    load_1m: {value: "50", unit: "%", op: ">", ceiling: cpu_count, region_floor: {ap-southeast-1: {value: "100"}, ap-southeast-2: {value: "100"}}}
+    load_5m: {value: "50", unit: "%", op: ">", ceiling: cpu_count, region_floor: {ap-southeast-1: {value: "75"}, ap-southeast-2: {value: "75"}}}
+    load_15m: {value: "50", unit: "%", op: ">", ceiling: cpu_count, region_floor: {ap-southeast-1: {value: "75"}, ap-southeast-2: {value: "75"}}}
+  description: "XCC system load stats"
 XCC CPU Usage per Process:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 14
-  deviation_threshold: "300%"
-  floor_value: "15%"
-  floor_op: ">"
+  threshold: {value: 15, unit: "%", op: ">", ceiling: 100}
   description: "XCC CPU usage per process stats"
 XCC Memory Usage per Process:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 16
-  deviation_threshold: "300%"
-  floor_value: "2.5%"
-  floor_op: ">"
+  threshold: {value: 2.5, unit: "%", op: ">", ceiling: 100}
   description: "XCC memory usage per process stats"
-XCC Memory Usage:
+XCC Memory Usage: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-1 xcc-metrics xcc-memory-usage
   status: active
-  deviation: RESOURCE
   data_view: chart
+  deviation: RESOURCE
   panel_id: 4
-  deviation_threshold: "300%"
-  description: "XCC memory usage stats"
+  deviation_threshold: "60%"
+  ceiling: {series: total}
   series_floor:
-    total: null                               # constant (total RAM ~8GB)
-    active: {value: "2GB", op: ">"}           # above p99.9 ~1.82GB
-    cache_buffers: {value: "6.3GB", op: ">"}  # above p99.9 ~6.10GB
-    swap: {value: "50MB", op: ">"}            # no historical data (0 series in any region) — conservative value
-    free: {value: "150MB", op: "<"}           # below the historical minimum ~174MB (eu-south-1, the only
-                                               # region with local cache). Deliberately conservative — this
-                                               # acts as a severe-drop alarm, not an early warning. Raise to
-                                               # ~180MB (near p0.1) for more sensitivity, or recalibrate once
-                                               # data from other regions is available.
+    total: null
+    cache_buffers: null
+    free: {value: "1", unit: "%", op: "<", ceiling: total}
+  description: "XCC memory usage stats"
 XCC Network IO:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 10
-  deviation_threshold: "300%"
-  floor_value: "1MB"
-  floor_op: ">"
+  threshold: {value: 1, unit: "MB", op: ">"}
   description: "XCC network IO stats"
 XCC Number of File Handles:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 17
-  deviation_threshold: "300%"
-  # Interim estimate, no historical data: ~80% of a common ulimit -n (65536)
-  # tuned on production instances. Confirm the real ulimit and adjust.
-  floor_value: 50000
-  floor_op: ">"
+  threshold: {value: 50000, op: ">"}
   description: "XCC number of file handles stats"
 XCC Disk Usage:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 61
-  deviation_threshold: "300%"
-  floor_value: "80%"
-  floor_op: ">"
+  threshold: {value: 80, unit: "%", op: ">", ceiling: 100}
   description: "XCC disk usage stats"
 XCC TCP Connection Counters:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 8
-  deviation_threshold: "300%"
-  # Interim estimate, no historical data: 1 million simultaneous TCP
-  # connections is implausible for this instance type; order of magnitude
-  # to confirm against the real volume observed on the panel.
-  floor_value: 30000
-  floor_op: ">"
+  threshold: {value: 30000, op: ">"}
   description: "XCC TCP connection counters stats"
 XCC Core SHMem Max Used:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 6
-  deviation_threshold: "300%"
-  # Interim estimate, no historical data: assumes bytes; Kamailio -m is
-  # typically configured between 64MB and 1GB+, the original floor (~1MB)
-  # always sat below normal usage. Confirm the real -m setting and adjust.
-  floor_value: "800MB"
-  floor_op: ">"
+  threshold: {value: 800, unit: "MB", op: ">"}
   description: "XCC core SHMem max used stats"
 XCC RTPEngine Connection Failures:
   status: active
-  deviation: RESOURCE
   data_view: chart
   panel_id: 68
-  deviation_threshold: "300%"
-  # Interim estimate, no historical data: "connection failures" should alert
-  # on small counts, not millions. If the query returns a raw/monotonic
-  # counter (not a rate), this absolute floor isn't a good detection
-  # strategy anyway — confirm whether rate()/irate() is used.
-  floor_value: 50
-  floor_op: ">"
+  threshold: {value: 50, op: ">"}
   description: "XCC RTPEngine connection failures stats"

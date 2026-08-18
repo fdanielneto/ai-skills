@@ -4,7 +4,7 @@ import json
 import statistics
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # render_chart(...) is called directly (in-process) by grafana_metrics.py and
 # kibana_metrics.py. The __main__ block below is kept only for standalone
@@ -76,9 +76,9 @@ def _render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
                 x_val = x_str  # fallback to string
             x_vals.append(x_val)
             y_vals.append(pt['y'])
-        parsed_lines.append((line.get('label'), x_vals, y_vals))
+        parsed_lines.append((line.get('label'), x_vals, y_vals, line.get('deviated', True)))
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(16, 8))
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
 
@@ -87,8 +87,9 @@ def _render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
     elif render_cfg.get('style') == 'state':
         _render_state(ax, parsed_lines)
     else:
-        for label, x_vals, y_vals in parsed_lines:
-            ax.plot(x_vals, y_vals, linestyle='-', label=label)
+        for label, x_vals, y_vals, deviated in parsed_lines:
+            ax.plot(x_vals, y_vals, linestyle='-', label=label,
+                    alpha=1.0 if deviated else 0.35)
 
     threshold = data.get('threshold')
     if threshold:
@@ -102,19 +103,68 @@ def _render_chart(title, output_path, x_label, y_label, data, render_cfg=None):
     if y_min is not None or y_max is not None:
         ax.set_ylim(bottom=y_min, top=y_max)
 
+    x_min, x_max = render_cfg.get('x_min'), render_cfg.get('x_max')
+    if x_min is not None or x_max is not None:
+        def _parse_ts_cfg(v):
+            if ' ' in v:
+                return datetime.strptime(v, '%Y-%m-%d %H:%M')
+            return datetime.strptime(v, '%Y-%m-%d')
+        ax.set_xlim(left=_parse_ts_cfg(x_min) if x_min is not None else None,
+                    right=_parse_ts_cfg(x_max) if x_max is not None else None)
+
     ax.set_title(title)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
 
-    # Auto-format dates on x-axis
-    fig.autofmt_xdate()
+    # X-axis ticks: graduated by the DISPLAYED time range (xlim when set for
+    # overview charts), falling back to the data range for auto-scaled zoom
+    # charts.  This prevents a data-sparse series (e.g. an instance with only
+    # 2 days of data) from triggering dense 3-hour ticks across a 14-day
+    # displayed window.  Ranges >14d use major ticks every 2 days + minor
+    # grid every day so labels don't overlap.
+    all_x = [x for _, x_vals, _, _ in parsed_lines for x in x_vals if isinstance(x, datetime)]
+    if x_min is not None and x_max is not None:
+        left, right = ax.get_xlim()
+        x_range = timedelta(days=right - left)
+    elif all_x:
+        x_range = max(all_x) - min(all_x)
+    else:
+        x_range = timedelta(0)
+    if x_range > timedelta(0):
+        if x_range <= timedelta(hours=12):
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+            fmt = '%b %d, %H:%M'
+        elif x_range <= timedelta(days=2):
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))
+            fmt = '%b %d, %H:%M'
+        elif x_range <= timedelta(days=5):
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+            fmt = '%b %d, %H:%M'
+        elif x_range <= timedelta(days=10):
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=12))
+            fmt = '%b %d, %H:%M'
+        elif x_range <= timedelta(days=14):
+            ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+            fmt = '%b %d'
+        else:
+            ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+            ax.xaxis.set_minor_locator(mdates.DayLocator(interval=1))
+            fmt = '%b %d'
+        ax.xaxis.set_major_formatter(mdates.DateFormatter(fmt))
+        # Subtle minor ticks: 30min for zoom ranges (<12h), 1h for short ranges (≤5d).
+        if x_range <= timedelta(hours=12):
+            ax.xaxis.set_minor_locator(mdates.MinuteLocator(interval=30))
+        elif x_range <= timedelta(days=5):
+            ax.xaxis.set_minor_locator(mdates.HourLocator(interval=1))
+
+    fig.autofmt_xdate(rotation=30, ha='right')
 
     if len(lines) > 0 or threshold:
         ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0, fontsize='small')
 
     ax.grid(True)
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -129,7 +179,7 @@ def _render_state(ax, parsed_lines):
     into a single line — they read as a small stack just below 1, while still
     clearly being value=1. Rendered as steps so 1->0 / 0->1 transitions are sharp.
     """
-    for i, (label, x_vals, y_vals) in enumerate(parsed_lines):
+    for i, (label, x_vals, y_vals, _) in enumerate(parsed_lines):
         offset = i * _STATE_OFFSET
         y_shifted = [y - offset for y in y_vals]
         ax.plot(x_vals, y_shifted, drawstyle='steps-post', linewidth=1.5,
@@ -143,7 +193,7 @@ def _render_bars(ax, parsed_lines):
     computed numerically; ax.xaxis_date() restores date tick labels afterwards.
     """
     n = len(parsed_lines) or 1
-    all_nums = sorted({mdates.date2num(x) for _label, x_vals, _y in parsed_lines
+    all_nums = sorted({mdates.date2num(x) for _label, x_vals, _y, _ in parsed_lines
                         for x in x_vals if isinstance(x, datetime)})
     if len(all_nums) > 1:
         diffs = [b - a for a, b in zip(all_nums, all_nums[1:]) if b > a]
@@ -152,7 +202,7 @@ def _render_bars(ax, parsed_lines):
         base_width = _DEFAULT_BAR_WIDTH_DAYS
 
     bar_width = base_width / n
-    for i, (label, x_vals, y_vals) in enumerate(parsed_lines):
+    for i, (label, x_vals, y_vals, _) in enumerate(parsed_lines):
         x_nums = [mdates.date2num(x) if isinstance(x, datetime) else x for x in x_vals]
         offset = (i - (n - 1) / 2.0) * bar_width
         ax.bar([x + offset for x in x_nums], y_vals, width=bar_width, label=label)
