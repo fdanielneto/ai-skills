@@ -8,9 +8,11 @@ Usage:
 Reads whichever of tmp/section_{oncall,xcc,rtpengine,sbc,events_tracking}.html
 exist under --out (default gcn-pm/tmp), assembles the header table + Table
 of Contents + sections in canonical order into tmp/page_full.html, uploads
-any referenced PNG attachments, PUTs the full body to the fixed GCN PM page
-(PAGE_ID) with a title reflecting the sprint dates, and runs the
-post-publish verification gate.
+any referenced PNG attachments, and publishes the full body as a child page
+of PARENT_PAGE_ID in SPACE_KEY, titled with the sprint dates. Upserts by
+title: updates the existing child page with that exact title if one already
+exists under the parent, otherwise creates it. Runs the post-publish
+verification gate either way.
 
 --no-publish: assemble page_full.html and run verify() against it locally,
 skipping the attachment upload and REST PUT (for standalone testing).
@@ -25,12 +27,14 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
 
 BASE_URL = "https://talkdesk.atlassian.net/wiki"
-PAGE_ID = "6568476792"
+SPACE_KEY = "UCInterconnect"
+PARENT_PAGE_ID = "5073666109"  # "Production meetings" page
 SECRETS_FILE = os.path.expanduser("~/.env.secrets")
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +89,17 @@ def request(method, path, username, token, body=None):
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         sys.exit(f"ERROR: {method} {path} -> HTTP {e.code}: {e.read().decode()[:500]}")
+
+
+def find_existing_page(title, username, token):
+    """Look up a child page of PARENT_PAGE_ID with this exact title, for
+    upsert-by-title (avoids duplicate pages when re-running the same sprint)."""
+    cql = f'space="{SPACE_KEY}" and title="{title}" and type=page'
+    result = request(
+        "GET", f"/rest/api/content/search?cql={urllib.parse.quote(cql)}&expand=version",
+        username, token)
+    results = result.get("results", [])
+    return results[0] if results else None
 
 
 def verify(storage_value):
@@ -181,7 +196,7 @@ def assemble(start, end, outdir):
     return full
 
 
-def upload_attachments(page_html_path):
+def upload_attachments(page_html_path, page_id):
     with open(page_html_path) as f:
         referenced = set(re.findall(r'ri:filename="([^"]+)"', f.read()))
     pngs = [p for p in glob.glob(os.path.join(SKILL_DIR, "tmp", "*.png"))
@@ -202,7 +217,7 @@ def upload_attachments(page_html_path):
                 + content + f"\r\n--{boundary}--\r\n".encode())
         # PUT = create-or-update by filename (POST 400s on duplicates)
         req = urllib.request.Request(
-            f"{BASE_URL}/rest/api/content/{PAGE_ID}/child/attachment",
+            f"{BASE_URL}/rest/api/content/{page_id}/child/attachment",
             data=body, method="PUT")
         req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
         req.add_header("X-Atlassian-Token", "no-check")
@@ -245,27 +260,42 @@ def main():
         print("OK (--no-publish): assembled + verified locally, skipped upload/PUT.")
         return
 
-    upload_attachments(page)
-
     username, token = load_credentials()
-    current = request("GET", f"/rest/api/content/{PAGE_ID}?expand=version", username, token)
-    next_version = current["version"]["number"] + 1
+    existing = find_existing_page(title, username, token)
 
-    print(f"publishing version {next_version}...", file=sys.stderr)
-    payload = {
-        "version": {"number": next_version, "message": message},
-        "type": "page",
-        "title": title,
-        "body": {"storage": {"value": storage_value, "representation": "storage"}},
-    }
-    request("PUT", f"/rest/api/content/{PAGE_ID}", username, token, payload)
+    if existing:
+        page_id = existing["id"]
+        next_version = existing["version"]["number"] + 1
+        print(f"updating existing page {page_id}, version {next_version}...", file=sys.stderr)
+        payload = {
+            "version": {"number": next_version, "message": message},
+            "type": "page",
+            "title": title,
+            "body": {"storage": {"value": storage_value, "representation": "storage"}},
+        }
+        request("PUT", f"/rest/api/content/{page_id}", username, token, payload)
+        action = f"updated (version {next_version})"
+    else:
+        print(f"creating new child page of {PARENT_PAGE_ID}...", file=sys.stderr)
+        payload = {
+            "type": "page",
+            "title": title,
+            "space": {"key": SPACE_KEY},
+            "ancestors": [{"id": PARENT_PAGE_ID}],
+            "body": {"storage": {"value": storage_value, "representation": "storage"}},
+        }
+        created = request("POST", "/rest/api/content", username, token, payload)
+        page_id = created["id"]
+        action = "created"
+
+    upload_attachments(page, page_id)
 
     published = request(
-        "GET", f"/rest/api/content/{PAGE_ID}?expand=body.storage", username, token
+        "GET", f"/rest/api/content/{page_id}?expand=body.storage", username, token
     )
     verify(published["body"]["storage"]["value"])
 
-    print(f"OK: published version {next_version} to {BASE_URL}/pages/viewpage.action?pageId={PAGE_ID}")
+    print(f"OK: {action} page {page_id} -> {BASE_URL}/pages/viewpage.action?pageId={page_id}")
 
 
 if __name__ == "__main__":

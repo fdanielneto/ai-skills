@@ -3,8 +3,8 @@ name: gcn-pm
 description: >
   Builds the GCN Production Meeting Confluence page (Status Review, On-Call
   Alarms, Post-Mortem, XCC Metrics, RTP Engine Metrics, Executive Summary +
-  Calls, Events Tracking) and publishes it under the Notes page in Fábio Neto's
-  personal Confluence space. MANUAL-ONLY skill: use this ONLY when the user explicitly
+  Calls, Events Tracking) and publishes it as a child page of "Production
+  meetings" in the UCInterconnect Confluence space. MANUAL-ONLY skill: use this ONLY when the user explicitly
   runs the `/gcn-pm` command, or explicitly asks to "generate / build the GCN
   production meeting page". Do NOT trigger proactively, and do NOT trigger for
   general questions about Confluence, Grafana, Kibana, SIP, call metrics, or
@@ -21,8 +21,8 @@ description: >
 # GCN Production Meeting — Page Builder (Orchestrator)
 
 This skill assembles a single Confluence page that mirrors the existing
-UCInterconnect "Production Meeting" pages, and publishes it into Fábio Neto's
-personal space.
+UCInterconnect "Production Meeting" pages, and publishes it as a child page
+under UCInterconnect's "Production meetings" page.
 
 This file is a pure bash dispatcher — no subagents, no reference files. Each
 section's data collection, HTML rendering, and fallback behavior lives
@@ -170,13 +170,14 @@ Events Tracking.
      further, never retry more than that one time, never publish a partial
      page.
 
-3. **If `run.py` exits 0:** fetch the just-published page
-   (`getConfluencePage`, page id `6568476792`) and, for whichever of the
-   XCC Metrics / RTP Engine Metrics sections this run rendered, count the
-   region block titles against the 8 tokens in `scripts/regions.py`. This
-   is a second, independent sanity check on top of `confluence_publish.py`'s
-   own guardrail — it should always agree; report it (and any discrepancy)
-   in the FINAL OUTPUT.
+3. **If `run.py` exits 0:** parse the page id from `confluence_publish.py`'s
+   final stdout line (`OK: created|updated page <id> -> ...`), fetch that
+   page (`getConfluencePage`), and, for whichever of the XCC Metrics / RTP
+   Engine Metrics sections this run rendered, count the region block titles
+   against the 8 tokens in `scripts/regions.py`. This is a second,
+   independent sanity check on top of `confluence_publish.py`'s own
+   guardrail — it should always agree; report it (and any discrepancy) in
+   the FINAL OUTPUT.
 
 4. **Never call `generate_*.py` or `confluence_publish.py` individually for
    a real `/gcn-pm` run** — `run.py` is the only entry point. (Running an
@@ -189,12 +190,16 @@ Events Tracking.
 
 ## PUBLISH TARGET (mandatory)
 
-- Space: `~622745edb7e7c7007159b8df`, numeric `spaceId` = `3406136357`.
-- Parent page: **Notes**, `pageId` = `3541107151`.
+- Space key: `UCInterconnect`.
+- Parent page: **Production meetings**, `pageId` = `5073666109`.
 - `cloudId`: `talkdesk.atlassian.net`.
 - Title: `Production Meeting Sprint <YYYYMMDD>-<YYYYMMDD>` (derived from the
   sprint start/end args each run).
-- Page id: `6568476792`.
+- Upsert by title: `confluence_publish.py` searches for an existing child
+  page of the parent above with that exact title — updates it if found,
+  otherwise creates it as a new child page. Never publishes to the old
+  fixed personal-space page (id `6568476792`); that page is no longer
+  touched by this skill.
 - Publish only via REST + `representation: "storage"` — never Atlassian MCP
   tools for publishing.
 
