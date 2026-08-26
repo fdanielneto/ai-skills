@@ -1,20 +1,20 @@
 defaults:
   dashboard: xconnect_dashboard_v3
 
-RTPEngine Alive: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-alive
+RTPEngine Alive: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-alive
   status: active
   data_view: chart
   panel_id: 46
   threshold: {value: 1, op: "<"}
   dashboard: xconnect
   description: "RTPEngine alive stats by RTPEngine instance (up/down status)"
-RTPEngine CPU Stats: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-cpu-stats
+RTPEngine CPU Stats: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-cpu-stats
   status: active
   data_view: chart
   panel_id: 65
   threshold: {value: 40, unit: "%", op: ">", ceiling: 100}
   description: "RTPEngine CPU usage stats"
-RTPEngine System Load: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 eu-south-1 rtpengine-metrics rtpengine-system-load
+RTPEngine System Load: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 eu-south-1 rtpengine-metrics rtpengine-system-load
   status: active
   deviation: RESOURCE
   data_view: chart
@@ -27,7 +27,7 @@ RTPEngine System Load: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07
     load_5m: {value: "50", unit: "%", op: ">", ceiling: cpu_count}
     load_15m: {value: "50", unit: "%", op: ">", ceiling: cpu_count}
   description: "RTPEngine system load stats"
-RTPEngine Memory Usage: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-memory-usage
+RTPEngine Memory Usage: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-memory-usage
   status: active
   data_view: chart
   deviation: RESOURCE
@@ -39,7 +39,7 @@ RTPEngine Memory Usage: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-0
     cache_buffers: null
     free: {value: "10", unit: "%", op: "<", ceiling: total}
   description: "RTPEngine memory usage stats"
-RTPEngine Network IO: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 eu-south-1 rtpengine-metrics rtpengine-network-io
+RTPEngine Network IO: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 eu-south-1 rtpengine-metrics rtpengine-network-io
   status: active
   data_view: chart
   panel_id: 63

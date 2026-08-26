@@ -4,7 +4,7 @@ confluence_publish.py pipeline via subprocess (the same invocation
 SKILL.md's bash dispatcher uses) and reports pass/fail per step.
 
 Usage:
-    test_skill.py <sprint-start YYYY-MM-DD> <sprint-end YYYY-MM-DD> \\
+    gcn-pm.py <sprint-start YYYY-MM-DD> <sprint-end YYYY-MM-DD> \\
         [section ...] [region ...] [metric-slug ...] [--no-publish] [--out DIR]
 
 Sections (same tokens/aliases as SKILL.md): on-call, xcc-metrics,
@@ -15,7 +15,7 @@ Any token that is not a section or region is treated as a metric slug (the
 metric name lowercased, non-alnum → '-', e.g. 'error-rates-spikes'). Metric
 slugs only apply to xcc-metrics / rtpengine-metrics, so pair them with that
 section, e.g.:
-    test_skill.py 2026-07-02 2026-07-13 xcc-metrics eu-south-1 error-rates-spikes
+    gcn-pm.py 2026-07-02 2026-07-13 xcc-metrics eu-south-1 error-rates-spikes
 Invalid slugs are rejected by the generator, which lists the valid ones.
 
 --no-publish: build tmp/section_*.html + page_full.html and verify
