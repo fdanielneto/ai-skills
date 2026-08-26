@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Generate the RTP Engine Metrics section: tmp/section_rtpengine.html.
+
+Usage:
+    generate_rtpengine.py <sprint_start YYYY-MM-DD> <sprint_end YYYY-MM-DD> \\
+        [region ...] [--metric slug[,slug...]] [--out DIR]
+
+--metric restricts analysis to the given metric slug(s) (metric name lowercased,
+non-alnum → '-', e.g. 'rtpengine-alive').
+
+Per-region deviation analysis via `grafana_metrics.py analyze` (P95/MAD/IQR +
+floor bypass, chart generation) against config/rtp_metrics.yaml. No Host
+Details table here — that's XCC-only (generate_xcc.py).
+
+Exit 0 with section_rtpengine.html written on success. Exit 1 on fatal error
+(dead Grafana session even after one refresh) — the orchestrator must not
+publish.
+"""
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.normpath(os.path.join(SCRIPTS, ".."))
+sys.path.insert(0, SCRIPTS)
+
+from regions import REGIONS, REGION_TOKENS  # noqa: E402
+from grafana_metrics import load_metric_slugs  # noqa: E402
+
+
+def run(cmd, timeout=120, _retries=1):
+    """Run a subprocess from the skill root; on Grafana auth error refresh and retry."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, bufsize=1, cwd=SKILL_DIR,
+                         env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    stderr_lines = []
+    for line in p.stderr:
+        stderr_lines.append(line)
+        print(line, end='', file=sys.stderr)
+    try:
+        stdout, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        sys.exit(f"ERROR: {' '.join(cmd)} timed out after {timeout}s")
+    if p.poll() != 0:
+        stderr = ''.join(stderr_lines)
+        err_lower = stderr.lower()
+        auth_errors = ("401", "unauthorized", "session expired", "sso", "login page")
+        if (any(kw in err_lower for kw in auth_errors)
+                and any("grafana_metrics.py" in part for part in cmd)):
+            if _retries <= 0:
+                sys.exit(f"ERROR: Grafana auth failed after retry:\n{stderr[-2000:]}")
+            print("Grafana session expired, refreshing...", file=sys.stderr)
+            ret = subprocess.run(
+                [sys.executable, os.path.join(SCRIPTS, "grafana_metrics.py"), "refresh"],
+                cwd=SKILL_DIR, text=True, timeout=240)
+            if ret.returncode != 0:
+                sys.exit("ERROR: Grafana session refresh failed.")
+            print("Grafana session refreshed, retrying...", file=sys.stderr)
+            return run(cmd, timeout=timeout, _retries=_retries - 1)
+        sys.exit(f"ERROR: {' '.join(cmd)} failed:\n{stderr[-2000:]}")
+    return stdout
+
+
+def epoch_ms(d, end_of_day=False):
+    t = datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if end_of_day:
+        t += timedelta(days=1) - timedelta(milliseconds=1)
+    return int(t.timestamp() * 1000)
+
+
+def expand(title, body):
+    return ('<ac:structured-macro ac:name="expand" ac:schema-version="1">'
+            f'<ac:parameter ac:name="title">{title}</ac:parameter>'
+            f'<ac:rich-text-body>{body}</ac:rich-text-body></ac:structured-macro>')
+
+
+_PANEL_ERRORS_RE = re.compile(r'^<!-- PANEL_ERRORS:(\d+) -->')
+
+
+def region_title(display, html):
+    """Region display name, with a ⚠ + failure count if grafana_metrics.py
+    flagged 404/401 panel failures (see PANEL_ERRORS marker in analyze())."""
+    m = _PANEL_ERRORS_RE.match(html)
+    if not m:
+        return display
+    return f"{display} ⚠️ ({m.group(1)} metric(s) unavailable)"
+
+
+def main():
+    argv = list(sys.argv[1:])
+    outdir = os.path.join(SKILL_DIR, "tmp")
+    if "--out" in argv:
+        i = argv.index("--out")
+        outdir = os.path.abspath(argv[i + 1])
+        del argv[i:i + 2]
+    metric_filter = set()
+    if "--metric" in argv:
+        i = argv.index("--metric")
+        metric_filter = {s for s in argv[i + 1].split(",") if s}
+        del argv[i:i + 2]
+    if len(argv) < 2:
+        sys.exit(__doc__)
+    start, end = argv[0], argv[1]
+    for d in (start, end):
+        datetime.strptime(d, "%Y-%m-%d")
+    region_filter = {t.lower().replace("_", "-") for t in argv[2:]}
+    unknown = region_filter - REGION_TOKENS
+    if unknown:
+        sys.exit(f"Unknown region token(s): {sorted(unknown)}\nValid: {sorted(REGION_TOKENS)}")
+
+    valid_slugs = load_metric_slugs(os.path.join(SKILL_DIR, "config", "rtp_metrics.yaml"))
+    unknown_metrics = metric_filter - valid_slugs.keys()
+    if unknown_metrics:
+        sys.exit(f"Unknown metric token(s): {sorted(unknown_metrics)}\n"
+                 f"Valid: {sorted(valid_slugs)}")
+
+    os.makedirs(outdir, exist_ok=True)
+    start_ms, end_ms = epoch_ms(start), epoch_ms(end, end_of_day=True)
+    parts = ["<h1>RTP Engine Metrics</h1>"]
+    for display, token in REGIONS:
+        if region_filter and token not in region_filter:
+            parts.append(expand(display,
+                "<p><em>Not analysed in this run (region filter active).</em></p>"))
+            continue
+        print(f"[RTPEngine] {token}...", file=sys.stderr)
+        cmd = [sys.executable, os.path.join(SCRIPTS, "grafana_metrics.py"), "analyze",
+               os.path.join(SKILL_DIR, "config", "rtp_metrics.yaml"),
+               str(start_ms), str(end_ms), token]
+        if metric_filter:
+            cmd += ["--metric", ",".join(sorted(metric_filter))]
+        html = run(cmd)
+        html = html.strip()
+        parts.append(expand(region_title(display, html), html))
+    print("[RTPEngine] done", file=sys.stderr)
+
+    path = os.path.join(outdir, "section_rtpengine.html")
+    with open(path, "w") as f:
+        f.write("".join(parts))
+    print(f"  wrote {path}")
+
+
+if __name__ == "__main__":
+    main()

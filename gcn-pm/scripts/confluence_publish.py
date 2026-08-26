@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Assemble + publish the GCN PM page to Confluence via REST + storage representation.
+
+Usage:
+    confluence_publish.py <sprint_start> <sprint_end> [--message "..."] \\
+        [--out DIR] [--no-publish]
+
+Reads whichever of tmp/section_{oncall,xcc,rtpengine,sbc,events_tracking}.html
+exist under --out (default gcn-pm/tmp), assembles the header table + Table
+of Contents + sections in canonical order into tmp/page_full.html, uploads
+any referenced PNG attachments, and publishes the full body as a child page
+of PARENT_PAGE_ID in SPACE_KEY, titled with the sprint dates. Upserts by
+title: updates the existing child page with that exact title if one already
+exists under the parent, otherwise creates it. Runs the post-publish
+verification gate either way.
+
+--no-publish: assemble page_full.html and run verify() against it locally,
+skipping the attachment upload and REST PUT (for standalone testing).
+
+Single attempt only — on any failure, prints the error and exits non-zero. No
+retries: retrying automatically is what caused the orchestrator loop this
+script is meant to fix.
+"""
+import glob
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from datetime import datetime
+
+BASE_URL = "https://talkdesk.atlassian.net/wiki"
+SPACE_KEY = "UCInterconnect"
+PARENT_PAGE_ID = "5073666109"  # "Production meetings" page
+SECRETS_FILE = os.path.expanduser("~/.env.secrets")
+
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.normpath(os.path.join(SCRIPTS, ".."))
+sys.path.insert(0, SCRIPTS)
+from regions import REGIONS  # noqa: E402
+
+SECTION_ORDER = ["section_oncall.html", "section_xcc.html", "section_rtpengine.html",
+                 "section_sbc.html", "section_events_tracking.html"]
+
+# Sections whose per_region_blocks() loop (generate_xcc.py / generate_rtpengine.py)
+# always emits exactly one expand-block title per REGIONS entry (real analysis or a
+# "Not analysed" placeholder) -- a title count off of len(REGIONS) means the file is
+# stale, truncated, or corrupted, regardless of any region filter used to produce it.
+REGION_SECTION_FILES = {"section_xcc.html", "section_rtpengine.html"}
+
+
+def load_credentials():
+    username = os.environ.get("ATLASSIAN_USERNAME")
+    token = os.environ.get("ATLASSIAN_API_TOKEN")
+    if username and token:
+        return username, token
+
+    if os.path.exists(SECRETS_FILE):
+        with open(SECRETS_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("ATLASSIAN_USERNAME="):
+                    username = username or line.split("=", 1)[1].strip('"\'')
+                elif line.startswith("ATLASSIAN_API_TOKEN="):
+                    token = token or line.split("=", 1)[1].strip('"\'')
+
+    if not username or not token:
+        sys.exit(
+            "ERROR: missing ATLASSIAN_USERNAME/ATLASSIAN_API_TOKEN "
+            f"(checked env and {SECRETS_FILE})"
+        )
+    return username, token
+
+
+def request(method, path, username, token, body=None):
+    url = f"{BASE_URL}{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    creds = f"{username}:{token}".encode()
+    import base64
+
+    req.add_header("Authorization", "Basic " + base64.b64encode(creds).decode())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"ERROR: {method} {path} -> HTTP {e.code}: {e.read().decode()[:500]}")
+
+
+def find_existing_page(title, username, token):
+    """Look up a child page of PARENT_PAGE_ID with this exact title, for
+    upsert-by-title (avoids duplicate pages when re-running the same sprint)."""
+    cql = f'space="{SPACE_KEY}" and title="{title}" and type=page'
+    result = request(
+        "GET", f"/rest/api/content/search?cql={urllib.parse.quote(cql)}&expand=version",
+        username, token)
+    results = result.get("results", [])
+    return results[0] if results else None
+
+
+def verify(storage_value):
+    for tag in re.finditer(r"<ac:image[^>]*>", storage_value):
+        if 'ac:align="center"' not in tag.group():
+            sys.exit("ERROR: verification failed — ac:image not centered")
+
+
+def check_oncall_jira_macros(name, html):
+    """Status Review and Post-Mortem each embed one classic Jira Issues
+    macro (ac:name="jira") -- the only mechanism confirmed to render a real,
+    live table (see generate_oncall.py's _jira_macro). Anything other than
+    exactly 2 means one of the sections silently lost its table."""
+    count = len(re.findall(r'<ac:structured-macro ac:name="jira"', html))
+    if count != 2:
+        sys.exit(f"ERROR: {name} has {count} Jira macro(s), expected 2 "
+                 "(Status Review + Post-Mortem) -- refusing to publish a broken section")
+
+
+def check_region_completeness(name, html):
+    """Every REGIONS display name must appear as exactly one expand-block
+    title (with or without the ⚠️ unavailable-metric suffix) -- see
+    REGION_SECTION_FILES. Catches a stale/truncated section file before it
+    gets published, independent of whether a region filter was intended."""
+    titles = re.findall(r'<ac:parameter ac:name="title">([^<]*)</ac:parameter>', html)
+    missing = [display for display, _ in REGIONS
+               if sum(1 for t in titles if t == display or t.startswith(display + " ")) != 1]
+    if missing:
+        sys.exit(f"ERROR: {name} is missing region block(s) for: {missing} "
+                 "(expected exactly one block per region -- file may be stale or truncated)")
+
+
+def check_freshness(name, path, marker_path):
+    """If a run marker exists (written by run.py at the start of the current
+    run), refuse to publish a section file older than it -- a leftover from
+    an earlier/manual run rather than this one."""
+    if not os.path.exists(marker_path):
+        return
+    if os.path.getmtime(path) < os.path.getmtime(marker_path):
+        sys.exit(f"ERROR: {name} predates this run (older than {marker_path}) -- "
+                 "stale leftover from a previous run, refusing to publish it")
+
+
+def ordinal_date(d):
+    """2026-05-07 -> 'May 07th' (zero-padded, as on the example pages)."""
+    dt = datetime.strptime(d, "%Y-%m-%d")
+    day = dt.day
+    suffix = "th" if 11 <= day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+    return f"{dt.strftime('%B')} {day:02d}{suffix}"
+
+
+def compact_date(d):
+    """2026-05-07 -> '20260507' (for the page title)."""
+    return datetime.strptime(d, "%Y-%m-%d").strftime("%Y%m%d")
+
+
+def expand(title, body):
+    return ('<ac:structured-macro ac:name="expand" ac:schema-version="1">'
+            f'<ac:parameter ac:name="title">{title}</ac:parameter>'
+            f'<ac:rich-text-body>{body}</ac:rich-text-body></ac:structured-macro>')
+
+
+def assemble(start, end, outdir):
+    run_date = datetime.now().strftime("%Y-%m-%d")
+    parts = [
+        "<table><tbody>",
+        f"<tr><th>Date</th><td>{ordinal_date(run_date)}</td></tr>",
+        f"<tr><th>Timeframe</th><td>{ordinal_date(start)} to {ordinal_date(end)}</td></tr>",
+        "</tbody></table>",
+        expand("Table of Contents",
+               '<ac:structured-macro ac:name="toc" ac:schema-version="1"/>'),
+    ]
+    found = False
+    marker_path = os.path.join(outdir, ".run_marker")
+    for name in SECTION_ORDER:
+        path = os.path.join(outdir, name)
+        if os.path.exists(path):
+            found = True
+            check_freshness(name, path, marker_path)
+            with open(path) as f:
+                content = f.read()
+            if name in REGION_SECTION_FILES:
+                check_region_completeness(name, content)
+            if name == "section_oncall.html":
+                check_oncall_jira_macros(name, content)
+            parts.append(content)
+    if not found:
+        sys.exit(f"ERROR: no section_*.html found under {outdir} — nothing to publish")
+
+    full = os.path.join(outdir, "page_full.html")
+    with open(full, "w") as f:
+        f.write("".join(parts))
+    print(f"  assembled {full}")
+    return full
+
+
+def upload_attachments(page_html_path, page_id):
+    with open(page_html_path) as f:
+        referenced = set(re.findall(r'ri:filename="([^"]+)"', f.read()))
+    pngs = [p for p in glob.glob(os.path.join(SKILL_DIR, "tmp", "*.png"))
+            if os.path.basename(p) in referenced]
+    if not pngs:
+        return
+    print(f"uploading {len(pngs)} images...", file=sys.stderr)
+    username, token = load_credentials()
+    import base64
+    auth = "Basic " + base64.b64encode(f"{username}:{token}".encode()).decode()
+    for p in pngs:
+        fname = os.path.basename(p)
+        boundary = uuid.uuid4().hex
+        with open(p, "rb") as f:
+            content = f.read()
+        body = ((f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                 f'filename="{fname}"\r\nContent-Type: image/png\r\n\r\n').encode()
+                + content + f"\r\n--{boundary}--\r\n".encode())
+        # PUT = create-or-update by filename (POST 400s on duplicates)
+        req = urllib.request.Request(
+            f"{BASE_URL}/rest/api/content/{page_id}/child/attachment",
+            data=body, method="PUT")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        req.add_header("X-Atlassian-Token", "no-check")
+        req.add_header("Authorization", auth)
+        try:
+            urllib.request.urlopen(req, timeout=120)
+            print(f"  uploaded attachment {fname}")
+        except urllib.error.HTTPError as e:
+            sys.exit(f"ERROR: attachment {fname} -> HTTP {e.code}: {e.read().decode()[:300]}")
+
+
+def main():
+    argv = list(sys.argv[1:])
+    outdir = os.path.join(SKILL_DIR, "tmp")
+    if "--out" in argv:
+        i = argv.index("--out")
+        outdir = os.path.abspath(argv[i + 1])
+        del argv[i:i + 2]
+    no_publish = "--no-publish" in argv
+    if no_publish:
+        argv.remove("--no-publish")
+    message = None
+    if "--message" in argv:
+        i = argv.index("--message")
+        message = argv[i + 1]
+        del argv[i:i + 2]
+
+    if len(argv) < 2:
+        sys.exit(f"Usage: {sys.argv[0]} <sprint_start> <sprint_end> [--message MSG] [--out DIR] [--no-publish]")
+    sprint_start, sprint_end = argv[0], argv[1]
+    message = message or f"gcn-pm run {sprint_start} to {sprint_end}"
+    title = f"Production Meeting Sprint {compact_date(sprint_start)}-{compact_date(sprint_end)}"
+
+    page = assemble(sprint_start, sprint_end, outdir)
+    with open(page) as f:
+        storage_value = f.read()
+
+    if no_publish:
+        verify(storage_value)
+        print("OK (--no-publish): assembled + verified locally, skipped upload/PUT.")
+        return
+
+    username, token = load_credentials()
+    existing = find_existing_page(title, username, token)
+
+    if existing:
+        page_id = existing["id"]
+        next_version = existing["version"]["number"] + 1
+        print(f"updating existing page {page_id}, version {next_version}...", file=sys.stderr)
+        payload = {
+            "version": {"number": next_version, "message": message},
+            "type": "page",
+            "title": title,
+            "body": {"storage": {"value": storage_value, "representation": "storage"}},
+        }
+        request("PUT", f"/rest/api/content/{page_id}", username, token, payload)
+        action = f"updated (version {next_version})"
+    else:
+        print(f"creating new child page of {PARENT_PAGE_ID}...", file=sys.stderr)
+        payload = {
+            "type": "page",
+            "title": title,
+            "space": {"key": SPACE_KEY},
+            "ancestors": [{"id": PARENT_PAGE_ID}],
+            "body": {"storage": {"value": storage_value, "representation": "storage"}},
+        }
+        created = request("POST", "/rest/api/content", username, token, payload)
+        page_id = created["id"]
+        action = "created"
+
+    upload_attachments(page, page_id)
+
+    published = request(
+        "GET", f"/rest/api/content/{page_id}?expand=body.storage", username, token
+    )
+    verify(published["body"]["storage"]["value"])
+
+    print(f"OK: {action} page {page_id} -> {BASE_URL}/pages/viewpage.action?pageId={page_id}")
+
+
+if __name__ == "__main__":
+    main()

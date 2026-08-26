@@ -1,0 +1,47 @@
+defaults:
+  dashboard: xconnect_dashboard_v3
+
+RTPEngine Alive: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-alive
+  status: active
+  data_view: chart
+  panel_id: 46
+  threshold: {value: 1, op: "<"}
+  dashboard: xconnect
+  description: "RTPEngine alive stats by RTPEngine instance (up/down status)"
+RTPEngine CPU Stats: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-cpu-stats
+  status: active
+  data_view: chart
+  panel_id: 65
+  threshold: {value: 40, unit: "%", op: ">", ceiling: 100}
+  description: "RTPEngine CPU usage stats"
+RTPEngine System Load: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 eu-south-1 rtpengine-metrics rtpengine-system-load
+  status: active
+  deviation: RESOURCE
+  data_view: chart
+  panel_id: 66
+  deviation_threshold: "60%"
+  ceiling: {series: cpu_count}
+  series_floor:
+    cpu_count: null
+    load_1m: {value: "50", unit: "%", op: ">", ceiling: cpu_count}
+    load_5m: {value: "50", unit: "%", op: ">", ceiling: cpu_count}
+    load_15m: {value: "50", unit: "%", op: ">", ceiling: cpu_count}
+  description: "RTPEngine system load stats"
+RTPEngine Memory Usage: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 ap-southeast-2 rtpengine-metrics rtpengine-memory-usage
+  status: active
+  data_view: chart
+  deviation: RESOURCE
+  panel_id: 67
+  deviation_threshold: "60%"
+  ceiling: {series: total}
+  series_floor:
+    total: null
+    cache_buffers: null
+    free: {value: "10", unit: "%", op: "<", ceiling: total}
+  description: "RTPEngine memory usage stats"
+RTPEngine Network IO: # python3 gcn-pm/scripts/gcn-pm.py 2026-07-08 2026-07-22 eu-south-1 rtpengine-metrics rtpengine-network-io
+  status: active
+  data_view: chart
+  panel_id: 63
+  threshold: {value: 500, unit: "MB", op: ">"}
+  description: "RTPEngine network IO stats"
