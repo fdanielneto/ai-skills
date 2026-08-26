@@ -136,6 +136,15 @@ def refresh():
         sys.exit("Login did not complete; no Vouch cookie captured.")
 
 
+# Set once search() has already renewed the session this run — prevents a
+# persistent (non-token) failure from re-launching Playwright on every request.
+_refresh_attempted = False
+
+
+class KibanaAuthError(Exception):
+    """Session expired — 401 or an SSO/login-page response instead of JSON."""
+
+
 # ==================== fetch ====================
 
 def _base_query(gte, lte):
@@ -194,21 +203,35 @@ def b2_body(gte, lte, sbc):
     return body
 
 
-def search(body):
-    """POST the ES body via Kibana's internal search API; return the raw ES response."""
+def search(body, _is_retry=False):
+    """POST the ES body via Kibana's internal search API; return the raw ES response.
+
+    On a 401 or an SSO-login-page response (session expired), renews the token
+    in-process (once per run) and retries this exact request before giving up —
+    see module-level _refresh_attempted."""
+    global _refresh_attempted
     payload = {"params": {"index": INDEX, "body": body}}
     req = Request(KIBANA_ORIGIN + SEARCH_PATH, data=json.dumps(payload).encode(), method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("kbn-xsrf", "true")
     req.add_header("Cookie", cookie_header())
     try:
-        resp = urlopen(req, timeout=60)
-        text = resp.read().decode()
-    except HTTPError as e:
-        sys.exit(f"ERROR: HTTP {e.code} from Kibana: {e.read().decode()[:300]}")
-    if text.lstrip().startswith("<"):
-        sys.exit("ERROR: Kibana returned an SSO/login page — session expired. "
-                  "Run: python3 gcn-pm/scripts/kibana_metrics.py refresh")
+        try:
+            resp = urlopen(req, timeout=60)
+            text = resp.read().decode()
+        except HTTPError as e:
+            if e.code == 401:
+                raise KibanaAuthError(f"HTTP 401 from Kibana: {e.read().decode()[:300]}")
+            sys.exit(f"ERROR: HTTP {e.code} from Kibana: {e.read().decode()[:300]}")
+        if text.lstrip().startswith("<"):
+            raise KibanaAuthError("Kibana returned an SSO/login page — session expired.")
+    except KibanaAuthError as e:
+        if not _is_retry and not _refresh_attempted:
+            _refresh_attempted = True
+            print(f"Kibana session expired ({e}) — renewing token before continuing...", file=sys.stderr)
+            refresh()
+            return search(body, _is_retry=True)
+        sys.exit(f"ERROR: {e} Run: python3 gcn-pm/scripts/kibana_metrics.py refresh")
     data = json.loads(text)
     if "rawResponse" not in data:
         sys.exit(f"ERROR: unexpected response, keys={list(data)[:10]}")

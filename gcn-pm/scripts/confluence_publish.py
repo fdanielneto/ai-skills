@@ -8,8 +8,9 @@ Usage:
 Reads whichever of tmp/section_{oncall,xcc,rtpengine,sbc,events_tracking}.html
 exist under --out (default gcn-pm/tmp), assembles the header table + Table
 of Contents + sections in canonical order into tmp/page_full.html, uploads
-any referenced PNG attachments, PUTs the full body to the fixed GCN PM Auto
-Test page, and runs the post-publish verification gate.
+any referenced PNG attachments, PUTs the full body to the fixed GCN PM page
+(PAGE_ID) with a title reflecting the sprint dates, and runs the
+post-publish verification gate.
 
 --no-publish: assemble page_full.html and run verify() against it locally,
 skipping the attachment upload and REST PUT (for standalone testing).
@@ -26,17 +27,25 @@ import sys
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 
 BASE_URL = "https://talkdesk.atlassian.net/wiki"
 PAGE_ID = "6568476792"
-TITLE = "GCN PM Auto Test"
 SECRETS_FILE = os.path.expanduser("~/.env.secrets")
 
-SKILL_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.normpath(os.path.join(SCRIPTS, ".."))
+sys.path.insert(0, SCRIPTS)
+from regions import REGIONS  # noqa: E402
 
 SECTION_ORDER = ["section_oncall.html", "section_xcc.html", "section_rtpengine.html",
                  "section_sbc.html", "section_events_tracking.html"]
+
+# Sections whose per_region_blocks() loop (generate_xcc.py / generate_rtpengine.py)
+# always emits exactly one expand-block title per REGIONS entry (real analysis or a
+# "Not analysed" placeholder) -- a title count off of len(REGIONS) means the file is
+# stale, truncated, or corrupted, regardless of any region filter used to produce it.
+REGION_SECTION_FILES = {"section_xcc.html", "section_rtpengine.html"}
 
 
 def load_credentials():
@@ -79,15 +88,44 @@ def request(method, path, username, token, body=None):
 
 
 def verify(storage_value):
-    for m in re.finditer(r"data-datasource", storage_value):
-        astart = storage_value.rfind("<a ", 0, m.start())
-        # 100 chars comfortably fits `<p local-id="<uuid-v4>" />` (~53 chars) plus whitespace.
-        pre = storage_value[max(0, astart - 100):astart]
-        if "<p local-id=" not in pre:
-            sys.exit("ERROR: verification failed — missing <p local-id/> before a datasource card")
     for tag in re.finditer(r"<ac:image[^>]*>", storage_value):
         if 'ac:align="center"' not in tag.group():
             sys.exit("ERROR: verification failed — ac:image not centered")
+
+
+def check_oncall_jira_macros(name, html):
+    """Status Review and Post-Mortem each embed one classic Jira Issues
+    macro (ac:name="jira") -- the only mechanism confirmed to render a real,
+    live table (see generate_oncall.py's _jira_macro). Anything other than
+    exactly 2 means one of the sections silently lost its table."""
+    count = len(re.findall(r'<ac:structured-macro ac:name="jira"', html))
+    if count != 2:
+        sys.exit(f"ERROR: {name} has {count} Jira macro(s), expected 2 "
+                 "(Status Review + Post-Mortem) -- refusing to publish a broken section")
+
+
+def check_region_completeness(name, html):
+    """Every REGIONS display name must appear as exactly one expand-block
+    title (with or without the ⚠️ unavailable-metric suffix) -- see
+    REGION_SECTION_FILES. Catches a stale/truncated section file before it
+    gets published, independent of whether a region filter was intended."""
+    titles = re.findall(r'<ac:parameter ac:name="title">([^<]*)</ac:parameter>', html)
+    missing = [display for display, _ in REGIONS
+               if sum(1 for t in titles if t == display or t.startswith(display + " ")) != 1]
+    if missing:
+        sys.exit(f"ERROR: {name} is missing region block(s) for: {missing} "
+                 "(expected exactly one block per region -- file may be stale or truncated)")
+
+
+def check_freshness(name, path, marker_path):
+    """If a run marker exists (written by run.py at the start of the current
+    run), refuse to publish a section file older than it -- a leftover from
+    an earlier/manual run rather than this one."""
+    if not os.path.exists(marker_path):
+        return
+    if os.path.getmtime(path) < os.path.getmtime(marker_path):
+        sys.exit(f"ERROR: {name} predates this run (older than {marker_path}) -- "
+                 "stale leftover from a previous run, refusing to publish it")
 
 
 def ordinal_date(d):
@@ -98,6 +136,11 @@ def ordinal_date(d):
     return f"{dt.strftime('%B')} {day:02d}{suffix}"
 
 
+def compact_date(d):
+    """2026-05-07 -> '20260507' (for the page title)."""
+    return datetime.strptime(d, "%Y-%m-%d").strftime("%Y%m%d")
+
+
 def expand(title, body):
     return ('<ac:structured-macro ac:name="expand" ac:schema-version="1">'
             f'<ac:parameter ac:name="title">{title}</ac:parameter>'
@@ -105,22 +148,29 @@ def expand(title, body):
 
 
 def assemble(start, end, outdir):
-    meeting = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    run_date = datetime.now().strftime("%Y-%m-%d")
     parts = [
         "<table><tbody>",
-        f"<tr><th>Date</th><td>{ordinal_date(meeting)}</td></tr>",
+        f"<tr><th>Date</th><td>{ordinal_date(run_date)}</td></tr>",
         f"<tr><th>Timeframe</th><td>{ordinal_date(start)} to {ordinal_date(end)}</td></tr>",
         "</tbody></table>",
         expand("Table of Contents",
                '<ac:structured-macro ac:name="toc" ac:schema-version="1"/>'),
     ]
     found = False
+    marker_path = os.path.join(outdir, ".run_marker")
     for name in SECTION_ORDER:
         path = os.path.join(outdir, name)
         if os.path.exists(path):
             found = True
+            check_freshness(name, path, marker_path)
             with open(path) as f:
-                parts.append(f.read())
+                content = f.read()
+            if name in REGION_SECTION_FILES:
+                check_region_completeness(name, content)
+            if name == "section_oncall.html":
+                check_oncall_jira_macros(name, content)
+            parts.append(content)
     if not found:
         sys.exit(f"ERROR: no section_*.html found under {outdir} — nothing to publish")
 
@@ -184,6 +234,7 @@ def main():
         sys.exit(f"Usage: {sys.argv[0]} <sprint_start> <sprint_end> [--message MSG] [--out DIR] [--no-publish]")
     sprint_start, sprint_end = argv[0], argv[1]
     message = message or f"gcn-pm run {sprint_start} to {sprint_end}"
+    title = f"Production Meeting Sprint {compact_date(sprint_start)}-{compact_date(sprint_end)}"
 
     page = assemble(sprint_start, sprint_end, outdir)
     with open(page) as f:
@@ -204,7 +255,7 @@ def main():
     payload = {
         "version": {"number": next_version, "message": message},
         "type": "page",
-        "title": TITLE,
+        "title": title,
         "body": {"storage": {"value": storage_value, "representation": "storage"}},
     }
     request("PUT", f"/rest/api/content/{PAGE_ID}", username, token, payload)

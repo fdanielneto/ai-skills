@@ -62,12 +62,18 @@ BASELINE_CACHE_DIR = os.path.join(SKILL_DIR, ".baseline_cache")
 # SPIKE seasonal baseline model defaults (see build_seasonal_baseline).
 BASELINE_WEEKS_DEFAULT = 8      # minimum history before a bucket is "trusted"
 MAX_BASELINE_WEEKS = 26         # cache prune cap (~6 months)
-BAND_K_DEFAULT = 4.0            # confidence-band multiplier on bucket MAD
+BAND_K_DEFAULT = 10.0           # confidence-band multiplier on bucket MAD
 MIN_BUCKET_SAMPLES = 20         # below this, fall back to the series' global stats
 MAD_FLOOR_FRACTION = 0.10       # mad_eff floor: 10% of the expected level
 MAD_ABS_FLOOR = 0.05            # mad_eff floor: absolute minimum (metric units)
 
 DEBUG_SEASONAL = False          # set by `analyze --debug`; prints bucket stats for flagged SPIKE series
+
+# Latched by _get_json while a renewal retry is in flight — prevents a
+# persistent (non-token) failure from re-launching Playwright on every
+# request. Reset once that retry succeeds, so a later, independent session
+# expiry in the same run can still trigger another renewal.
+_refresh_attempted = False
 
 GRAFANA_ORIGIN = "https://grafana-general.svc.talkdeskapp.com"
 GRAFANA_URL = GRAFANA_ORIGIN + "/"
@@ -213,9 +219,17 @@ class GrafanaHttpClient:
         params = {"query": expr, "time": end_s, "dedup": "true", "max_source_resolution": "auto"}
         return {"data": self._get(PROXY_INSTANT_PATH.format(uid=datasource_uid), params)}
 
-    def _get_json(self, path, params):
+    def _get_json(self, path, params, _is_retry=False):
         """Auth'd GET, SSO-page detection, JSON parse — shared by every endpoint
-        (Prometheus proxy, dashboard API), each of which validates its own shape."""
+        (Prometheus proxy, dashboard API), each of which validates its own shape.
+
+        On a 401 or an SSO-login-page response (session expired), renews the
+        token in-process and retries this exact request before giving up.
+        _refresh_attempted only latches for the duration of one retry cycle
+        (reset once the retry succeeds) — this guards against a refresh loop
+        if the cookie is persistently bad, while still allowing a *later*,
+        independent expiry in the same run to trigger another renewal."""
+        global _refresh_attempted
         url = f"{self.origin}{path}?{urlencode(params)}"
         req = Request(url, method="GET")
         req.add_header("Accept", "application/json")
@@ -226,9 +240,23 @@ class GrafanaHttpClient:
             resp = urlopen(req, timeout=self.timeout)
             body = resp.read().decode()
         except HTTPError as e:
+            if e.code == 401 and not _is_retry and not _refresh_attempted:
+                _refresh_attempted = True
+                print("Grafana session expired (401) — renewing token before continuing...", file=sys.stderr)
+                refresh()
+                result = self._get_json(path, params, _is_retry=True)
+                _refresh_attempted = False
+                return result
             raise GrafanaHTTPError(e.code, f"grafana: HTTP {e.code}: {e.read().decode()[:300]}")
 
         if body.lstrip().startswith("<"):
+            if not _is_retry and not _refresh_attempted:
+                _refresh_attempted = True
+                print("Grafana session expired (SSO redirect) — renewing token before continuing...", file=sys.stderr)
+                refresh()
+                result = self._get_json(path, params, _is_retry=True)
+                _refresh_attempted = False
+                return result
             raise RuntimeError(
                 "ERROR: Grafana returned an SSO/login page — session expired. "
                 "Run: python3 gcn-pm/scripts/grafana_metrics.py refresh"
@@ -722,7 +750,11 @@ def _resolve_region_floor(region_floor_map, region, floor_value, floor_op):
         raise ValueError(
             f"region_floor entry for {region!r} must be "
             f"{{value: ...}} or {{value: ..., op: ...}}, got {override!r}")
-    return parse_human_value(override['value']), override.get('op', floor_op)
+    raw_val = override['value']
+    unit = override.get('unit')
+    if unit and unit != '%':
+        raw_val = f"{raw_val}{unit}"
+    return parse_human_value(raw_val), override.get('op', floor_op)
 
 
 def resolve_ceiling(ceiling_cfg, region=None):
@@ -903,12 +935,21 @@ def build_ceiling_index(client, resolved_queries, ceiling_keys, start_ms, end_ms
     return index
 
 
-def series_label(metric):
-    """Human label for a series: prefer instance, then a name-ish label."""
+def series_label(metric, extra_label=None):
+    """Human label for a series: prefer instance, then a name-ish label.
+    If extra_label names another label present on this series, append it as
+    '<label> - <extra value>' — for per-process metrics where one instance
+    reports multiple named series (e.g. label_extra: process_name)."""
+    label = None
     for key in ('instance', 'name', 'metric', 'xheader', '__name__'):
         if metric.get(key):
-            return metric[key]
-    return 'aggregated'
+            label = metric[key]
+            break
+    if label is None:
+        label = 'aggregated'
+    if extra_label and metric.get(extra_label):
+        label = f"{label} - {metric[extra_label]}"
+    return label
 
 
 def series_points(series):
@@ -1594,7 +1635,8 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
                 flagged_dev, _, dev_threshold = detect_deviation(deviation_rule, values, deviation_threshold)
 
             flagged = flagged_floor or flagged_ceiling or flagged_dev
-            all_series_data.append((series_label(series.get('metric', {})), points, flagged))
+            label_extra = config.get('label_extra')
+            all_series_data.append((series_label(series.get('metric', {}), label_extra), points, flagged))
             # Reference threshold: the actual decision boundary that triggered.
             if flagged_floor and abs_floor_value is not None:
                 ref_threshold = abs_floor_value
@@ -1607,10 +1649,10 @@ def analyze_metric(client, metric_name, config, start_epoch_ms, end_epoch_ms,
             if flagged:
                 if is_spike and DEBUG_SEASONAL and model is not None:
                     print(f"  DEBUG spike {section} {metric_name} "
-                          f"{series_label(series.get('metric', {}))}: "
+                          f"{series_label(series.get('metric', {}), label_extra)}: "
                           f"{_debug_seasonal_line(model, peak_ts, band_k)}", file=sys.stderr)
                 deviated.append({
-                    "instance": series_label(series.get('metric', {})),
+                    "instance": series_label(series.get('metric', {}), label_extra),
                     "peak": peak_val,
                     "timestamp": peak_ts,
                     "points": points,

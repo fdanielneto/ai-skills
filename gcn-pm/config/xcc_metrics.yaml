@@ -62,24 +62,24 @@ Custom Metrics Rates (Spikes):
   panel_id: 232
   description: "XCC custom metrics rates (spikes)"
   series_floor:
-    total_custom_rate: {value: 20, op: ">"}
-    emergency_invites_rate: {value: 5, op: ">"}
-    inbound_invites_rate: {value: 9, op: ">"}
-    outbound_offnet_invites_rate: {value: 11, op: ">"}
-    outbound_onnet_invites_rate: {value: 0.05, op: ">"}
-    rtpengine_connection_failure_rate: {value: 0.1, op: ">"}
+    total_custom_rate: null
+    emergency_invites_rate: {value: 1, op: ">"}
+    inbound_invites_rate: {value: 20, op: ">"}
+    outbound_offnet_invites_rate: {value: 20, op: ">"}
+    outbound_onnet_invites_rate: {value: 2, op: ">"}
+    rtpengine_connection_failure_rate: {value: 2, op: ">"}
     siprec_calls_rate: {value: 5, op: ">"}
-Error Rates (Spikes):
+Error Rates (Spikes): # python3 gcn-pm/scripts/test_skill.py 2026-08-10 2026-08-19 xcc-metrics error-rates-spikes
   status: active
   deviation: SPIKE
   data_view: chart
   panel_id: 231
   description: "XCC error rates (spikes)"
   series_floor:
-    total_error_rate: {value: 6, op: ">"}
-    "4xx_rate": {value: 3, op: ">"}
-    "5xx_rate": {value: 2, op: ">"}
-    "6xx_rate": {value: 0.15, op: ">"}
+    total_error_rate: {value: 10, op: ">"}
+    "4xx_rate": {value: 5, op: ">"}
+    "5xx_rate": {value: 3, op: ">"}
+    "6xx_rate": {value: 1, op: ">"}
 XCC CPU Stats: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-1 xcc-metrics xcc-cpu-stats
   status: active
   deviation: RESOURCE
@@ -104,13 +104,14 @@ XCC CPU Usage per Process:
   status: active
   data_view: chart
   panel_id: 14
-  threshold: {value: 15, unit: "%", op: ">", ceiling: 100}
+  threshold: {value: 30, unit: "%", op: ">", ceiling: 100}
   description: "XCC CPU usage per process stats"
 XCC Memory Usage per Process:
   status: active
   data_view: chart
   panel_id: 16
-  threshold: {value: 2.5, unit: "%", op: ">", ceiling: 100}
+  threshold: {value: 800, unit: "MB", op: ">"}
+  label_extra: process_name
   description: "XCC memory usage per process stats"
 XCC Memory Usage: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 ap-southeast-1 xcc-metrics xcc-memory-usage
   status: active
@@ -124,19 +125,25 @@ XCC Memory Usage: # python3 gcn-pm/scripts/test_skill.py 2026-07-08 2026-07-22 a
     cache_buffers: null
     free: {value: "1", unit: "%", op: "<", ceiling: total}
   description: "XCC memory usage stats"
-XCC Network IO:
+XCC Network IO: # python3 gcn-pm/scripts/test_skill.py 2026-08-10 2026-08-19 xcc-metrics xcc-network-io
   status: active
   data_view: chart
   panel_id: 10
-  threshold: {value: 1, unit: "MB", op: ">"}
+  threshold: {value: 60, unit: "MB", op: ">"}
   description: "XCC network IO stats"
-XCC Number of File Handles:
+XCC Number of File Handles: # python3 gcn-pm/scripts/test_skill.py 2026-08-10 2026-08-19 xcc-metrics xcc-number-of-file-handles
   status: active
   data_view: chart
   panel_id: 17
-  threshold: {value: 50000, op: ">"}
+  threshold: {value: 2500, op: ">"}
+  region_floor:
+    eu-south-1: {value: 1850, op: ">"}
+    eu-west-3: {value: 1850, op: ">"}
+    ap-southeast-1: {value: 2300, op: ">"}
+    ap-southeast-2: {value: 2300, op: ">"}
+    sa-east-1: {value: 1900, op: ">"}
   description: "XCC number of file handles stats"
-XCC Disk Usage:
+XCC Disk Usage: # python3 gcn-pm/scripts/test_skill.py 2026-08-10 2026-08-19 xcc-metrics xcc-disk-usage
   status: active
   data_view: chart
   panel_id: 61
@@ -146,17 +153,28 @@ XCC TCP Connection Counters:
   status: active
   data_view: chart
   panel_id: 8
-  threshold: {value: 30000, op: ">"}
+  threshold: {value: 2000, op: ">"}
   description: "XCC TCP connection counters stats"
-XCC Core SHMem Max Used:
+XCC Core SHMem Max Used: # python3 gcn-pm/scripts/test_skill.py 2026-08-10 2026-08-19 xcc-metrics xcc-core-shmem-max-used
   status: active
   data_view: chart
   panel_id: 6
   threshold: {value: 800, unit: "MB", op: ">"}
+  region_floor:
+    eu-south-1: {value: 1400, unit: "MB", op: ">"}
+    eu-west-3: {value: 1400, unit: "MB", op: ">"}
+    ap-southeast-1: {value: 800, unit: "MB", op: ">"}
+    ap-southeast-2: {value: 1400, unit: "MB", op: ">"}
+    us-east-1: {value: 1400, unit: "MB", op: ">"}
+    us-west-2: {value: 1400, unit: "MB", op: ">"}
+    sa-east-1: {value: 800, unit: "MB", op: ">"}
+    ca-central-1: {value: 800, unit: "MB", op: ">"}
   description: "XCC core SHMem max used stats"
-XCC RTPEngine Connection Failures:
+  expr: kamailio_shm_bytes{region=~"$region",role=~"$role",auto_scaling_group=~"$cluster",instance=~"$instance",type="max_used"}
+XCC RTPEngine Connection Failures: # python3 gcn-pm/scripts/test_skill.py 2026-08-10 2026-08-19 xcc-metrics xcc-rtpengine-connection-failures
   status: active
   data_view: chart
   panel_id: 68
-  threshold: {value: 50, op: ">"}
+  threshold: {value: 100, op: ">"}
   description: "XCC RTPEngine connection failures stats"
+  expr: sum by (instance) (rate(kamailio_rtpengine_connection_failure{region=~"$region",role=~"$role",auto_scaling_group=~"$cluster",instance=~"$instance"}[$__rate_interval]) * 1000)

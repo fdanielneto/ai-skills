@@ -26,9 +26,11 @@ personal space.
 
 This file is a pure bash dispatcher — no subagents, no reference files. Each
 section's data collection, HTML rendering, and fallback behavior lives
-entirely in its `scripts/generate_*.py`; this file only decides which of
-them to run and in what order, checks their exit codes, and calls
-`scripts/confluence_publish.py` once at the end.
+entirely in its `scripts/generate_*.py`. The whole run — wiping `tmp/`,
+running the requested generators in order, fail-fasting on the first
+failure, and publishing once — is driven by a single entry point,
+`scripts/run.py`; this file only decides what to pass it and how to react
+to its exit code.
 
 ## ACTIVATION
 
@@ -135,64 +137,63 @@ of THAT run; the page is wiped and rebuilt from scratch each time. Canonical
 section order: On-Call → XCC Metrics → RTP Engine Metrics → SBC Metrics →
 Events Tracking.
 
-1. **Clear stale local files** (every run, before dispatching anything —
-   covers leftovers from a previous run that failed before its own cleanup):
+1. **Run the single orchestrator**, forwarding exactly the section/region
+   tokens the user gave (or none, for a full run):
    ```
-   rm -rf gcn-pm/tmp/*
+   python3 gcn-pm/scripts/run.py <start> <end> [section ...] [region ...]
    ```
-   This never touches `gcn-pm/.auth/` (session cookies + Playwright profile)
-   — that's a sibling directory, not under `tmp/`.
-2. **Run each requested section's generator** (all 4 for a full run, fewer
-   for a block run):
-
-   | Section             | Command |
-   |----------------------|---------|
-   | `on-call`             | `python3 gcn-pm/scripts/generate_oncall.py <start> <end>` |
-   | `xcc-metrics`         | `python3 gcn-pm/scripts/generate_xcc.py <start> <end> [region ...]` |
-   | `rtpengine-metrics`   | `python3 gcn-pm/scripts/generate_rtpengine.py <start> <end> [region ...]` |
-   | `sbc-metrics`         | `python3 gcn-pm/scripts/generate_sbc.py <start> <end>` |
-
-   **Fail-fast (mandatory)**: check the exit code of every command above. If
-   ANY is non-zero, STOP — do not run the remaining generators, do not call
-   `confluence_publish.py`. Report the failing command's stderr to the user
-   as the FINAL OUTPUT. Never publish a partial page.
+   `run.py` does the entire run by itself, with no further input needed:
+   wipes `gcn-pm/tmp/` and writes a run marker; runs each requested
+   generator in order, fail-fasting immediately (before running the rest or
+   publishing) on the first non-zero exit; then calls
+   `confluence_publish.py` exactly once. `confluence_publish.py` itself
+   refuses to publish — regardless of what `run.py` thought happened — if
+   any XCC/RTP Engine section is missing a region block versus
+   `scripts/regions.py` (stale/truncated file) or if any section file
+   predates this run's marker (stale leftover from an earlier run). It
+   cleans `gcn-pm/tmp/` on success and leaves it in place on any failure,
+   for debugging. Never touches `gcn-pm/.auth/` (session cookies +
+   Playwright profile) — that's a sibling directory, not under `tmp/`.
 
    A generator's own *documented fallback* (e.g. `generate_oncall.py`
-   rendering the On-Call Alarms warning panel when Playwright can't complete)
-   is a successful exit 0 — not a failure, and not a reason to retry.
+   rendering the On-Call Alarms warning panel when Playwright can't
+   complete) is a successful exit 0 inside `run.py` — not a failure.
 
-3. **Publish** (only once every requested generator above exited 0):
-   ```
-   python3 gcn-pm/scripts/confluence_publish.py <start> <end>
-   ```
-   This assembles the header table + Table of Contents + whichever
-   `tmp/section_*.html` exist (canonical order), uploads referenced PNG
-   attachments, PUTs the page, and runs the post-publish verification gate.
-   Non-zero exit = publish or verification failed — report the exact error
-   text to the user, do not retry.
+2. **If `run.py` exits non-zero:** read the reported stderr.
+   - If the cause is one you can recognize and fix without guessing (e.g.
+     the Grafana/Kibana session needs a manual re-login that `run.py`'s own
+     one internal auth-retry couldn't resolve, or an obviously transient
+     network error) — apply that one fix and re-run `run.py`
+     **exactly one more time**.
+   - If it fails again, or the cause isn't recognizable/fixable, **stop and
+     report the exact error to the user** as the FINAL OUTPUT. Never guess
+     further, never retry more than that one time, never publish a partial
+     page.
 
-4. **Clean up local files** (only if step 3 exited 0 — publish + verification
-   both succeeded):
-   ```
-   rm -rf gcn-pm/tmp/*
-   ```
-   This removes every locally-created working file from this run (raw JSON,
-   assembled section HTML, `page_full.html`, chart PNGs) now that they've
-   been uploaded/published. `gcn-pm/.auth/` is untouched (sibling directory).
-   If step 3 failed (non-zero exit), **skip this step** — leave `gcn-pm/tmp/`
-   as-is so the failed run can be inspected for debugging.
+3. **If `run.py` exits 0:** fetch the just-published page
+   (`getConfluencePage`, page id `6568476792`) and, for whichever of the
+   XCC Metrics / RTP Engine Metrics sections this run rendered, count the
+   region block titles against the 8 tokens in `scripts/regions.py`. This
+   is a second, independent sanity check on top of `confluence_publish.py`'s
+   own guardrail — it should always agree; report it (and any discrepancy)
+   in the FINAL OUTPUT.
 
-5. **Run exactly once per invocation.** Never re-dispatch generators or
-   re-attempt the publish within the same `/gcn-pm` call, even on a
-   documented-fallback outcome or a verification failure. If the user wants
-   another attempt, they invoke `/gcn-pm` again.
+4. **Never call `generate_*.py` or `confluence_publish.py` individually for
+   a real `/gcn-pm` run** — `run.py` is the only entry point. (Running an
+   individual generator, or `confluence_publish.py --no-publish`, by hand
+   for standalone testing outside of a real `/gcn-pm` invocation is fine.)
+
+5. **Run at most one cycle of step 1, plus the single retry in step 2, per
+   `/gcn-pm` invocation.** If the user wants another attempt after that,
+   they invoke `/gcn-pm` again.
 
 ## PUBLISH TARGET (mandatory)
 
 - Space: `~622745edb7e7c7007159b8df`, numeric `spaceId` = `3406136357`.
 - Parent page: **Notes**, `pageId` = `3541107151`.
 - `cloudId`: `talkdesk.atlassian.net`.
-- Title (FIXED): `GCN PM Auto Test`.
+- Title: `Production Meeting Sprint <YYYYMMDD>-<YYYYMMDD>` (derived from the
+  sprint start/end args each run).
 - Page id: `6568476792`.
 - Publish only via REST + `representation: "storage"` — never Atlassian MCP
   tools for publishing.
@@ -203,4 +204,6 @@ After publishing, report back:
 - ✅ Page rebuilt (state: full run or block run)
 - 🧩 Which section(s) this run rendered — note that all other sections were cleared
 - 📊 Which metrics/regions deviated and got a chart + table this run
-- 📄 The page URL (printed by `confluence_publish.py` on success)
+- 🔎 Region completeness check (step 3 of RUN): N/8 region blocks confirmed
+  per region-aware section rendered this run
+- 📄 The page URL (printed by `run.py`/`confluence_publish.py` on success)
