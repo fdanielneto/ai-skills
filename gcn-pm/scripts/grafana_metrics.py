@@ -1809,12 +1809,15 @@ def load_metric_slugs(config_file):
             if isinstance(v, dict) and v.get('status') == 'active'}
 
 
-def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filter=None):
-    """Run the full fetch + deviation-detection + chart pipeline for every
-    active metric in config_file. Returns the Confluence Storage HTML block.
-
-    metric_filter: optional set of metric slugs (see metric_slug); when given,
-    only matching metrics are analysed."""
+def collect_metric_results(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filter=None):
+    """Run the fetch + deviation-detection pipeline for every active metric in
+    config_file (or just metric_filter, when given) and return the raw,
+    unrendered results. render_region_html() turns this into the final
+    Confluence HTML block — kept as a separate step so a single metric's
+    results can be collected in isolation (see the `collect-metric` CLI mode,
+    used by the gcn-pm Dark Factory per-metric workflows) and later merged
+    with other metrics' results from the same region before rendering,
+    producing byte-identical output to analyzing them all in one call."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     with open(config_file, 'r') as f:
@@ -1865,6 +1868,32 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filte
         )
         grafana_link = build_grafana_url(grafana_base, region, start_epoch_ms, end_epoch_ms) if region else grafana_base
 
+    return {
+        "section": section,
+        "region": region,
+        "grafana_link": grafana_link,
+        "all_html": all_html,
+        "has_deviation": has_deviation,
+        "failures": failures,
+        "baseline_warnings": baseline_warnings,
+    }
+
+
+def render_region_html(collected):
+    """Render collect_metric_results()'s raw dict into the final Confluence
+    Storage HTML block for one region — the exact assembly analyze() always
+    performed, extracted so it can run once over metrics collected across
+    multiple separate collect_metric_results() calls (e.g. one per metric,
+    merged by region — see gcn-pm's Dark Factory assemble scripts) and still
+    produce byte-identical output to one combined call."""
+    section = collected["section"]
+    region = collected["region"]
+    grafana_link = collected["grafana_link"]
+    all_html = collected["all_html"]
+    has_deviation = collected["has_deviation"]
+    failures = collected["failures"]
+    baseline_warnings = collected["baseline_warnings"]
+
     final_html = f'<p><a href="{grafana_link}">Grafana — {section} {region}</a></p>\n'
 
     if failures:
@@ -1911,6 +1940,16 @@ def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filte
     return final_html
 
 
+def analyze(config_file, start_epoch_ms, end_epoch_ms, region=None, metric_filter=None):
+    """Run the full fetch + deviation-detection + chart pipeline for every
+    active metric in config_file. Returns the Confluence Storage HTML block.
+
+    metric_filter: optional set of metric slugs (see metric_slug); when given,
+    only matching metrics are analysed."""
+    return render_region_html(
+        collect_metric_results(config_file, start_epoch_ms, end_epoch_ms, region, metric_filter))
+
+
 # ==================== CLI ====================
 
 def main():
@@ -1943,6 +1982,32 @@ def main():
         region = argv[3] if len(argv) > 3 else None
         try:
             print(analyze(config_file, start_epoch_ms, end_epoch_ms, region, metric_filter))
+        except Exception as e:
+            sys.exit(f"Error: {e}")
+    elif mode == "collect-metric":
+        # Same as `analyze`, but for exactly one metric, and prints the raw
+        # collect_metric_results() dict as JSON instead of rendered HTML — the
+        # Dark Factory per-metric workflows use this to produce one fragment
+        # per (metric, region), later merged by region and rendered with
+        # render_region_html() so the assembled section is byte-identical to
+        # what `analyze` would have produced for all metrics together.
+        argv = sys.argv[2:]
+        metric_filter = None
+        if "--metric" in argv:
+            i = argv.index("--metric")
+            metric_filter = {s for s in argv[i + 1].split(",") if s}
+            del argv[i:i + 2]
+        if len(argv) < 3 or not metric_filter:
+            sys.exit("Usage: grafana_metrics.py collect-metric <config_yaml> <start_epoch_ms> "
+                     "<end_epoch_ms> [region] --metric <slug>")
+        config_file = argv[0]
+        start_epoch_ms = int(argv[1])
+        end_epoch_ms = int(argv[2])
+        region = argv[3] if len(argv) > 3 else None
+        try:
+            collected = collect_metric_results(config_file, start_epoch_ms, end_epoch_ms,
+                                                region, metric_filter)
+            print(json.dumps(collected))
         except Exception as e:
             sys.exit(f"Error: {e}")
     else:
